@@ -179,9 +179,10 @@ def lark_add_batch(table_id, records_list):
 # TIKTOK SHOP HELPERS
 # ============================================================
 
-def tiktok_sign(path: str, params: dict) -> str:
+def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
     """
-    HMAC-SHA256: app_secret + path + sorted_param_string + app_secret
+    HMAC-SHA256 untuk TikTok Shop API v202309.
+    Format: app_secret + path + sorted_param_string + body_string + app_secret
     Exclude: sign, access_token
     """
     excluded = {"sign", "access_token"}
@@ -190,7 +191,12 @@ def tiktok_sign(path: str, params: dict) -> str:
         for k, v in sorted(params.items())
         if k not in excluded
     )
-    base = TIKTOK_APP_SECRET + path + sorted_str + TIKTOK_APP_SECRET
+    # v202309: body juga ikut di-sign untuk POST
+    body_str = ""
+    if body:
+        import json
+        body_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
+    base = TIKTOK_APP_SECRET + path + sorted_str + body_str + TIKTOK_APP_SECRET
     return hmac.new(
         TIKTOK_APP_SECRET.encode("utf-8"),
         base.encode("utf-8"),
@@ -259,7 +265,8 @@ def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = Tru
     """POST request ke TikTok Shop API v202309 dengan auto-sign & auto-refresh."""
     params = tiktok_base_params()
     params.update(extra)
-    params["sign"] = tiktok_sign(path, params)
+    # v202309: body ikut di-sign
+    params["sign"] = tiktok_sign(path, params, body)
     headers = {
         "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
         "Content-Type": "application/json",
@@ -340,16 +347,16 @@ def fetch_all_tiktok_data():
 
     data = {}
 
-    # --- Orders (v202309) ---
+    # --- Orders (v202309) - pakai Search Orders ---
     print("  → Fetching orders...")
-    orders_resp = tiktok_get("/order/202309/orders", {
-        "create_time_from": str(ts_start),
-        "create_time_to":   str(ts_end),
-        "page_size":        "100",
+    orders_resp = tiktok_post("/order/202309/orders/search", body={
+        "create_time_ge": ts_start,
+        "create_time_lt": ts_end,
+        "page_size":      50,
     })
     data["orders"] = orders_resp.get("orders", []) if orders_resp else []
 
-    # --- Order details (v202309, batch 50) ---
+    # --- Order details (v202309) ---
     print("  → Fetching order details...")
     order_ids = [o["id"] for o in data["orders"] if o.get("id")]
     all_details = []
@@ -359,7 +366,7 @@ def fetch_all_tiktok_data():
         all_details.extend(detail_resp.get("orders", []) if detail_resp else [])
     data["order_details"] = all_details
 
-    # --- Products (v202309, paginated) ---
+    # --- Products (v202309) ---
     print("  → Fetching products...")
     all_products = []
     page_token = ""
@@ -380,9 +387,11 @@ def fetch_all_tiktok_data():
     # --- Finance statements (v202309) ---
     print("  → Fetching finance...")
     finance_resp = tiktok_get("/finance/202309/statements", {
-        "create_time_from": str(ts_start),
-        "create_time_to":   str(ts_end),
-        "page_size":        "100",
+        "create_time_ge":  str(ts_start),
+        "create_time_lt":  str(ts_end),
+        "page_size":       "100",
+        "sort_field":      "CREATE_TIME",
+        "sort_order":      "DESC",
     })
     data["finance"] = finance_resp.get("statements", []) if finance_resp else []
 
