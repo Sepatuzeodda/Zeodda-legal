@@ -201,12 +201,11 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
 TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "")
 
 def tiktok_base_params() -> dict:
-    """Parameter wajib untuk v202309."""
+    """Parameter wajib untuk TikTok Shop API."""
     params = {
         "app_key":      TIKTOK_APP_KEY,
         "access_token": TIKTOK_ACCESS_TOKEN,
         "timestamp":    str(int(time.time())),
-        "version":      "202309",
     }
     if TIKTOK_SHOP_CIPHER:
         params["shop_cipher"] = TIKTOK_SHOP_CIPHER
@@ -241,19 +240,23 @@ def tiktok_refresh_token() -> bool:
         return False
 
 def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
-    """GET request ke TikTok Shop API v202306."""
+    """GET request ke TikTok Shop API."""
     params = tiktok_base_params()
     params.update(extra)
     params["sign"] = tiktok_sign(path, params)
+    headers = {
+        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+    }
     try:
-        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, timeout=30)
+        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, headers=headers, timeout=30)
         data = r.json()
+        print(f"🔍 TikTok GET [{path}] raw: code={data.get('code')} msg={data.get('message','')[:80]}")
         if data.get("code") in (40001, 40002, 40003) and _retry:
             print("⚠️ TikTok token expired, mencoba refresh...")
             if tiktok_refresh_token():
                 return tiktok_get(path, extra, _retry=False)
         if data.get("code") != 0:
-            print(f"❌ TikTok GET error [{path}]: {data.get('message')} (code={data.get('code')})")
             return {}
         return data.get("data", {})
     except Exception as e:
@@ -261,19 +264,23 @@ def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
         return {}
 
 def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = True) -> dict:
-    """POST request ke TikTok Shop API v202306."""
+    """POST request ke TikTok Shop API."""
     params = tiktok_base_params()
     params.update(extra)
     params["sign"] = tiktok_sign(path, params)
+    headers = {
+        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+    }
     try:
-        r = requests.post(f"{TIKTOK_BASE_URL}{path}", params=params, json=body, timeout=30)
+        r = requests.post(f"{TIKTOK_BASE_URL}{path}", params=params, json=body, headers=headers, timeout=30)
         data = r.json()
+        print(f"🔍 TikTok POST [{path}] raw: code={data.get('code')} msg={data.get('message','')[:80]}")
         if data.get("code") in (40001, 40002, 40003) and _retry:
             print("⚠️ TikTok token expired, mencoba refresh...")
             if tiktok_refresh_token():
                 return tiktok_post(path, body, extra, _retry=False)
         if data.get("code") != 0:
-            print(f"❌ TikTok POST error [{path}]: {data.get('message')} (code={data.get('code')})")
             return {}
         return data.get("data", {})
     except Exception as e:
