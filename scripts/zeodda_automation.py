@@ -22,8 +22,8 @@ SHOPEE_BASE_URL     = "https://openplatform.sandbox.test-stable.shopee.sg"
 
 TIKTOK_APP_KEY       = os.environ.get("TIKTOK_SHOP_APP_KEY", "")
 TIKTOK_APP_SECRET    = os.environ.get("TIKTOK_SHOP_APP_SECRET", "")
-TIKTOK_ACCESS_TOKEN  = os.environ.get("TIKTOK_SHOP_ACCESS_TOKEN", "")
-TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_SHOP_REFRESH_TOKEN", "")
+TIKTOK_ACCESS_TOKEN  = os.environ.get("TIKTOK_SHOP_ACCESS_TOKEN", "").strip()
+TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_SHOP_REFRESH_TOKEN", "").strip()
 TIKTOK_SHOP_ID       = os.environ.get("TIKTOK_SHOP_SHOP_ID", "")
 TIKTOK_BASE_URL      = "https://open-api.tiktokglobalshop.com"
 TIKTOK_TOKEN_URL     = "https://auth.tiktok-shops.com/api/v2/token/get"
