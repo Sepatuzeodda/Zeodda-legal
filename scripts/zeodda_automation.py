@@ -182,8 +182,8 @@ def lark_add_batch(table_id, records_list):
 def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
     """
     HMAC-SHA256 untuk TikTok Shop API v202309.
-    Format: app_secret + path + sorted_param_string + body_string + app_secret
-    Exclude: sign, access_token
+    Format: app_secret + path + sorted_param_string + app_secret
+    Body TIDAK ikut di-sign untuk v202309.
     """
     excluded = {"sign", "access_token"}
     sorted_str = "".join(
@@ -191,12 +191,7 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         for k, v in sorted(params.items())
         if k not in excluded
     )
-    # v202309: body juga ikut di-sign untuk POST
-    body_str = ""
-    if body:
-        import json
-        body_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
-    base = TIKTOK_APP_SECRET + path + sorted_str + body_str + TIKTOK_APP_SECRET
+    base = TIKTOK_APP_SECRET + path + sorted_str + TIKTOK_APP_SECRET
     return hmac.new(
         TIKTOK_APP_SECRET.encode("utf-8"),
         base.encode("utf-8"),
@@ -265,8 +260,7 @@ def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = Tru
     """POST request ke TikTok Shop API v202309 dengan auto-sign & auto-refresh."""
     params = tiktok_base_params()
     params.update(extra)
-    # v202309: body ikut di-sign
-    params["sign"] = tiktok_sign(path, params, body)
+    params["sign"] = tiktok_sign(path, params)  # body tidak ikut sign
     headers = {
         "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
         "Content-Type": "application/json",
@@ -390,7 +384,7 @@ def fetch_all_tiktok_data():
         "create_time_ge":  str(ts_start),
         "create_time_lt":  str(ts_end),
         "page_size":       "100",
-        "sort_field":      "CREATE_TIME",
+        "sort_field":      "statement_time",
         "sort_order":      "DESC",
     })
     data["finance"] = finance_resp.get("statements", []) if finance_resp else []
