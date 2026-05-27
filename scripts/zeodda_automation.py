@@ -15,7 +15,7 @@ SHOPEE_BASE_URL     = "https://openplatform.sandbox.test-stable.shopee.sg"
 
 LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
 LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
-LARK_APP_TOKEN  = "WficwtQQGi0nx5k8yv2lAJLYg0g"
+LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
 LARK_BASE_URL   = "https://open.larksuite.com"
 
 TABLE_DAILY_OVERVIEW = "tblOIk5Rv5wTrbOM"
