@@ -198,17 +198,21 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         hashlib.sha256
     ).hexdigest()
 
-TIKTOK_SHOP_CIPHER = ""
+TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "")
 
 def tiktok_base_params() -> dict:
-    """Parameter wajib untuk v202306 — pakai shop_id dan access_token di query."""
-    return {
+    """Parameter wajib untuk v202309."""
+    params = {
         "app_key":      TIKTOK_APP_KEY,
         "access_token": TIKTOK_ACCESS_TOKEN,
         "timestamp":    str(int(time.time())),
-        "shop_id":      str(TIKTOK_SHOP_ID),  # harus string
-        "version":      "202306",
+        "version":      "202309",
     }
+    if TIKTOK_SHOP_CIPHER:
+        params["shop_cipher"] = TIKTOK_SHOP_CIPHER
+    elif TIKTOK_SHOP_ID:
+        params["shop_id"] = str(TIKTOK_SHOP_ID)
+    return params
 
 def tiktok_refresh_token() -> bool:
     """Refresh access token. Kembalikan True jika berhasil."""
@@ -337,48 +341,54 @@ def fetch_all_tiktok_data():
 
     data = {}
 
-    # --- Orders (v202306) ---
+    # --- Orders (v202309) ---
     print("  → Fetching orders...")
-    orders_resp = tiktok_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time",
-        "time_from":        str(ts_start),
-        "time_to":          str(ts_end),
-        "page_size":        "100",
-        "order_status":     "ALL",
+    orders_resp = tiktok_post("/order/202309/orders/search", body={
+        "create_time_ge": ts_start,
+        "create_time_lt": ts_end,
+        "page_size":      50,
     })
-    data["orders"] = orders_resp.get("order_list", []) if orders_resp else []
+    data["orders"] = orders_resp.get("orders", []) if orders_resp else []
 
-    # --- Order details (v202306) ---
+    # --- Order details (v202309) ---
     print("  → Fetching order details...")
-    order_ids = [o["order_id"] for o in data["orders"] if o.get("order_id")]
+    order_ids = [o["id"] for o in data["orders"] if o.get("id")]
     all_details = []
     for i in range(0, len(order_ids), 50):
-        batch = ",".join(order_ids[i:i+50])
-        detail_resp = tiktok_get("/api/v2/order/get_order_detail", {
-            "order_id_list": batch,
-        })
-        orders = detail_resp.get("order_list", []) if detail_resp else []
-        all_details.extend(orders)
+        batch = order_ids[i:i+50]
+        detail_resp = tiktok_post("/order/202309/orders/detail/query",
+                                  body={"order_id_list": batch})
+        all_details.extend(detail_resp.get("orders", []) if detail_resp else [])
     data["order_details"] = all_details
 
-    # --- Products (v202306) ---
+    # --- Products (v202309) ---
     print("  → Fetching products...")
-    prod_resp = tiktok_get("/api/v2/product/get_item_list", {
-        "offset":      "0",
-        "page_size":   "100",
-        "item_status": "ACTIVATE",
-    })
-    data["products"] = prod_resp.get("items", []) if prod_resp else []
+    all_products = []
+    page_token = ""
+    while True:
+        body = {"page_size": 100}
+        if page_token:
+            body["page_token"] = page_token
+        prod_resp = tiktok_post("/product/202309/products/search", body=body)
+        if not prod_resp:
+            break
+        products = prod_resp.get("products", [])
+        all_products.extend(products)
+        page_token = prod_resp.get("next_page_token", "")
+        if not products or not page_token:
+            break
+    data["products"] = all_products
 
-    # --- Finance (v202306) ---
+    # --- Finance (v202309) ---
     print("  → Fetching finance...")
-    finance_resp = tiktok_get("/api/v2/finance/get_settlements", {
-        "start_timestamp": str(ts_start),
-        "end_timestamp":   str(ts_end),
-        "page":            "1",
-        "page_size":       "100",
+    finance_resp = tiktok_get("/finance/202309/statements", {
+        "create_time_ge": str(ts_start),
+        "create_time_lt": str(ts_end),
+        "page_size":      "100",
+        "sort_field":     "statement_time",
+        "sort_order":     "DESC",
     })
-    data["finance"] = finance_resp.get("settlement_list", []) if finance_resp else []
+    data["finance"] = finance_resp.get("statements", []) if finance_resp else []
 
     print(f"🔍 TikTok: {len(data['orders'])} orders, {len(data['products'])} produk, {len(data['finance'])} transaksi")
     print("✅ Data TikTok Shop berhasil diambil!")
