@@ -175,7 +175,7 @@ def fetch_all_shopee_data():
 
 def input_daily_overview(d):
     print("📋 Input Daily Overview...")
-    perf_map = {1: "Poor", 2: "Improvement Needed", 3: "Good", 4: "Excellent"}
+
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
 
     overall_perf = d["shop_perf"].get("overall_performance", {})
@@ -185,6 +185,9 @@ def input_daily_overview(d):
     all_orders       = d["orders"].get("order_list", [])
     cancelled_orders = d["cancelled_orders"].get("order_list", [])
 
+    # Skor Performa Toko = tipe Number di Lark → kirim angka 1-4, bukan string
+    skor_performa = safe_int(overall_perf.get("rating", 0))  # 1=Poor, 2=Improvement, 3=Good, 4=Excellent
+
     fields = {
         "Tanggal":                today_ms,
         "Platform":               "Shopee",
@@ -193,7 +196,7 @@ def input_daily_overview(d):
         "Total Retur":            safe_int(len(d["returns"].get("return_list", []))),
         "Omzet Harian":           safe_int(d["income"].get("total_income", 0)),
         "Follower Toko":          safe_int(d["shop_info"].get("follower_count", 0)),
-        "Skor Performa Toko":     perf_map.get(safe_int(overall_perf.get("rating", 0)), "Unknown"),
+        "Skor Performa Toko":     skor_performa,  # FIX: int bukan string
         "Poin Penalti":           safe_int(d["penalty"].get("total_penalty_point", 0)),
         "Order Terlambat":        safe_int(d["late_orders"].get("total_count", 0)),
         "Produk Bermasalah":      safe_int(d["issues"].get("total_count", 0)),
