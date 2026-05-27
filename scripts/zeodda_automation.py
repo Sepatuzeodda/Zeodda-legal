@@ -202,6 +202,11 @@ def input_daily_overview(d):
         "Produk Bermasalah":      safe_int(d["issues"].get("total_count", 0)),
         "Saldo Iklan":            safe_int(d["balance"].get("total_balance", 0)),
     }
+    # DEBUG: print semua field dan tipenya sebelum kirim
+    print("🔍 DEBUG Daily Overview fields:")
+    for k, v in fields.items():
+        print(f"   {k}: {repr(v)} (type={type(v).__name__})")
+
     result = lark_add(TABLE_DAILY_OVERVIEW, fields)
     print("✅ Daily Overview done!" if result.get("code") == 0 else "❌ Gagal")
 
