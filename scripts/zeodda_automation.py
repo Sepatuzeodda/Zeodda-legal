@@ -198,57 +198,17 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         hashlib.sha256
     ).hexdigest()
 
-TIKTOK_SHOP_CIPHER = ""  # Di-fetch otomatis saat run
-
-def tiktok_get_shop_cipher() -> str:
-    """Fetch shop_cipher dari authorized shops — wajib untuk v202309."""
-    global TIKTOK_SHOP_CIPHER
-    if TIKTOK_SHOP_CIPHER:
-        return TIKTOK_SHOP_CIPHER
-    params = {
-        "app_key":   TIKTOK_APP_KEY,
-        "timestamp": str(int(time.time())),
-    }
-    excluded = {"sign", "access_token"}
-    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in excluded)
-    base = TIKTOK_APP_SECRET + "/authorization/202309/shops" + sorted_str + TIKTOK_APP_SECRET
-    params["sign"] = hmac.new(
-        TIKTOK_APP_SECRET.encode("utf-8"),
-        base.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    headers = {
-        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-    }
-    try:
-        r = requests.get(f"{TIKTOK_BASE_URL}/authorization/202309/shops",
-                        params=params, headers=headers, timeout=30)
-        data = r.json()
-        if data.get("code") != 0:
-            print(f"❌ get_shop_cipher error: {data.get('message')} (code={data.get('code')})")
-            return ""
-        shops = data.get("data", {}).get("shops", [])
-        if shops:
-            TIKTOK_SHOP_CIPHER = shops[0].get("cipher", "")
-            print(f"✅ TikTok shop_cipher: {TIKTOK_SHOP_CIPHER[:10]}...")
-            return TIKTOK_SHOP_CIPHER
-        print("❌ Tidak ada shop ditemukan")
-        return ""
-    except Exception as e:
-        print(f"❌ get_shop_cipher error: {e}")
-        return ""
+TIKTOK_SHOP_CIPHER = ""
 
 def tiktok_base_params() -> dict:
-    """Parameter wajib untuk v202309 — pakai shop_cipher bukan shop_id."""
-    cipher = tiktok_get_shop_cipher()
-    params = {
-        "app_key":   TIKTOK_APP_KEY,
-        "timestamp": str(int(time.time())),
+    """Parameter wajib untuk v202306 — pakai shop_id dan access_token di query."""
+    return {
+        "app_key":      TIKTOK_APP_KEY,
+        "access_token": TIKTOK_ACCESS_TOKEN,
+        "timestamp":    str(int(time.time())),
+        "shop_id":      str(TIKTOK_SHOP_ID),  # harus string
+        "version":      "202306",
     }
-    if cipher:
-        params["shop_cipher"] = cipher
-    return params
 
 def tiktok_refresh_token() -> bool:
     """Refresh access token. Kembalikan True jika berhasil."""
@@ -277,16 +237,12 @@ def tiktok_refresh_token() -> bool:
         return False
 
 def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
-    """GET request ke TikTok Shop API v202309 dengan auto-sign & auto-refresh."""
+    """GET request ke TikTok Shop API v202306."""
     params = tiktok_base_params()
     params.update(extra)
     params["sign"] = tiktok_sign(path, params)
-    headers = {
-        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-    }
     try:
-        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, headers=headers, timeout=30)
+        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, timeout=30)
         data = r.json()
         if data.get("code") in (40001, 40002, 40003) and _retry:
             print("⚠️ TikTok token expired, mencoba refresh...")
@@ -301,16 +257,12 @@ def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
         return {}
 
 def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = True) -> dict:
-    """POST request ke TikTok Shop API v202309 dengan auto-sign & auto-refresh."""
+    """POST request ke TikTok Shop API v202306."""
     params = tiktok_base_params()
     params.update(extra)
-    params["sign"] = tiktok_sign(path, params)  # body tidak ikut sign
-    headers = {
-        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-    }
+    params["sign"] = tiktok_sign(path, params)
     try:
-        r = requests.post(f"{TIKTOK_BASE_URL}{path}", params=params, json=body, headers=headers, timeout=30)
+        r = requests.post(f"{TIKTOK_BASE_URL}{path}", params=params, json=body, timeout=30)
         data = r.json()
         if data.get("code") in (40001, 40002, 40003) and _retry:
             print("⚠️ TikTok token expired, mencoba refresh...")
@@ -385,53 +337,48 @@ def fetch_all_tiktok_data():
 
     data = {}
 
-    # --- Orders (v202309) - pakai Search Orders ---
+    # --- Orders (v202306) ---
     print("  → Fetching orders...")
-    orders_resp = tiktok_post("/order/202309/orders/search", body={
-        "create_time_ge": ts_start,
-        "create_time_lt": ts_end,
-        "page_size":      50,
+    orders_resp = tiktok_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time",
+        "time_from":        str(ts_start),
+        "time_to":          str(ts_end),
+        "page_size":        "100",
+        "order_status":     "ALL",
     })
-    data["orders"] = orders_resp.get("orders", []) if orders_resp else []
+    data["orders"] = orders_resp.get("order_list", []) if orders_resp else []
 
-    # --- Order details (v202309) ---
+    # --- Order details (v202306) ---
     print("  → Fetching order details...")
-    order_ids = [o["id"] for o in data["orders"] if o.get("id")]
+    order_ids = [o["order_id"] for o in data["orders"] if o.get("order_id")]
     all_details = []
     for i in range(0, len(order_ids), 50):
-        batch = order_ids[i:i+50]
-        detail_resp = tiktok_post("/order/202309/orders/detail/query", body={"order_id_list": batch})
-        all_details.extend(detail_resp.get("orders", []) if detail_resp else [])
+        batch = ",".join(order_ids[i:i+50])
+        detail_resp = tiktok_get("/api/v2/order/get_order_detail", {
+            "order_id_list": batch,
+        })
+        orders = detail_resp.get("order_list", []) if detail_resp else []
+        all_details.extend(orders)
     data["order_details"] = all_details
 
-    # --- Products (v202309) ---
+    # --- Products (v202306) ---
     print("  → Fetching products...")
-    all_products = []
-    page_token = ""
-    while True:
-        body = {"page_size": 100}
-        if page_token:
-            body["page_token"] = page_token
-        prod_resp = tiktok_post("/product/202309/products/search", body=body)
-        if not prod_resp:
-            break
-        products = prod_resp.get("products", [])
-        all_products.extend(products)
-        page_token = prod_resp.get("next_page_token", "")
-        if not products or not page_token:
-            break
-    data["products"] = all_products
-
-    # --- Finance statements (v202309) ---
-    print("  → Fetching finance...")
-    finance_resp = tiktok_get("/finance/202309/statements", {
-        "create_time_ge":  str(ts_start),
-        "create_time_lt":  str(ts_end),
-        "page_size":       "100",
-        "sort_field":      "statement_time",
-        "sort_order":      "DESC",
+    prod_resp = tiktok_get("/api/v2/product/get_item_list", {
+        "offset":      "0",
+        "page_size":   "100",
+        "item_status": "ACTIVATE",
     })
-    data["finance"] = finance_resp.get("statements", []) if finance_resp else []
+    data["products"] = prod_resp.get("items", []) if prod_resp else []
+
+    # --- Finance (v202306) ---
+    print("  → Fetching finance...")
+    finance_resp = tiktok_get("/api/v2/finance/get_settlements", {
+        "start_timestamp": str(ts_start),
+        "end_timestamp":   str(ts_end),
+        "page":            "1",
+        "page_size":       "100",
+    })
+    data["finance"] = finance_resp.get("settlement_list", []) if finance_resp else []
 
     print(f"🔍 TikTok: {len(data['orders'])} orders, {len(data['products'])} produk, {len(data['finance'])} transaksi")
     print("✅ Data TikTok Shop berhasil diambil!")
