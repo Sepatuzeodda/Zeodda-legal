@@ -198,13 +198,57 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         hashlib.sha256
     ).hexdigest()
 
-def tiktok_base_params() -> dict:
-    return {
-        "app_key":      TIKTOK_APP_KEY,
-        "access_token": TIKTOK_ACCESS_TOKEN,
-        "timestamp":    str(int(time.time())),
-        "shop_id":      TIKTOK_SHOP_ID,
+TIKTOK_SHOP_CIPHER = ""  # Di-fetch otomatis saat run
+
+def tiktok_get_shop_cipher() -> str:
+    """Fetch shop_cipher dari authorized shops — wajib untuk v202309."""
+    global TIKTOK_SHOP_CIPHER
+    if TIKTOK_SHOP_CIPHER:
+        return TIKTOK_SHOP_CIPHER
+    params = {
+        "app_key":   TIKTOK_APP_KEY,
+        "timestamp": str(int(time.time())),
     }
+    excluded = {"sign", "access_token"}
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in excluded)
+    base = TIKTOK_APP_SECRET + "/authorization/202309/shops" + sorted_str + TIKTOK_APP_SECRET
+    params["sign"] = hmac.new(
+        TIKTOK_APP_SECRET.encode("utf-8"),
+        base.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    headers = {
+        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.get(f"{TIKTOK_BASE_URL}/authorization/202309/shops",
+                        params=params, headers=headers, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            print(f"❌ get_shop_cipher error: {data.get('message')} (code={data.get('code')})")
+            return ""
+        shops = data.get("data", {}).get("shops", [])
+        if shops:
+            TIKTOK_SHOP_CIPHER = shops[0].get("cipher", "")
+            print(f"✅ TikTok shop_cipher: {TIKTOK_SHOP_CIPHER[:10]}...")
+            return TIKTOK_SHOP_CIPHER
+        print("❌ Tidak ada shop ditemukan")
+        return ""
+    except Exception as e:
+        print(f"❌ get_shop_cipher error: {e}")
+        return ""
+
+def tiktok_base_params() -> dict:
+    """Parameter wajib untuk v202309 — pakai shop_cipher bukan shop_id."""
+    cipher = tiktok_get_shop_cipher()
+    params = {
+        "app_key":   TIKTOK_APP_KEY,
+        "timestamp": str(int(time.time())),
+    }
+    if cipher:
+        params["shop_cipher"] = cipher
+    return params
 
 def tiktok_refresh_token() -> bool:
     """Refresh access token. Kembalikan True jika berhasil."""
