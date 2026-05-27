@@ -10,10 +10,8 @@ SHOPEE_PARTNER_KEY  = os.environ.get("SHOPEE_PARTNER_KEY", "")
 SHOPEE_SHOP_ID      = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
 SHOPEE_ACCESS_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "")
 SHOPEE_BASE_URL     = "https://openplatform.sandbox.test-stable.shopee.sg"
-# Ganti ke ini saat Production approved:
-# SHOPEE_BASE_URL = "https://partner.shopeemobile.com"
+# SHOPEE_BASE_URL = "https://partner.shopeemobile.com"  # Production
 
-# LARK - Pakai user_access_token langsung
 LARK_USER_TOKEN = os.environ.get("LARK_USER_TOKEN", "")
 LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
 LARK_BASE_URL   = "https://open.larksuite.com"
@@ -32,20 +30,36 @@ TABLE_ALERT_LOG      = "tblCutzEM4Bp0DmN"
 # ============================================================
 
 def safe_int(val):
-    """Semua field angka di Lark pakai Number format Thousands → harus int"""
-    if val is None or isinstance(val, (dict, list)):
+    """Semua field angka di Lark = Number Thousands separator → harus int"""
+    if val is None:
+        return 0
+    if isinstance(val, (dict, list)):
+        print(f"  ⚠️ safe_int got {type(val).__name__}: {repr(val)[:80]}")
         return 0
     try:
-        return int(float(val))  # float() dulu agar "1500.0" bisa dikonversi
-    except:
+        return int(float(str(val)))
+    except Exception as e:
+        print(f"  ⚠️ safe_int conversion error: {repr(val)} → {e}")
         return 0
 
 def safe_str(val):
-    if val is None:
-        return ""
-    if isinstance(val, (dict, list)):
+    if val is None or isinstance(val, (dict, list)):
         return ""
     return str(val)
+
+def safe_dict(d, key):
+    """Get a sub-dict safely, always returns dict"""
+    if not isinstance(d, dict):
+        return {}
+    v = d.get(key, {})
+    return v if isinstance(v, dict) else {}
+
+def safe_list(d, key):
+    """Get a list from dict safely, always returns list"""
+    if not isinstance(d, dict):
+        return []
+    v = d.get(key, [])
+    return v if isinstance(v, list) else []
 
 # ============================================================
 # SHOPEE HELPERS
@@ -68,7 +82,8 @@ def shopee_get(path, extra={}):
     try:
         r = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
         data = r.json()
-        return data.get("response") or {}
+        resp = data.get("response")
+        return resp if isinstance(resp, dict) else {}
     except Exception as e:
         print(f"❌ Request error {path}: {e}")
         return {}
@@ -79,7 +94,7 @@ def shopee_get(path, extra={}):
 
 def get_lark_headers():
     if not LARK_USER_TOKEN:
-        raise Exception("LARK_USER_TOKEN tidak ditemukan di environment!")
+        raise Exception("LARK_USER_TOKEN tidak ditemukan!")
     return {
         "Authorization": f"Bearer {LARK_USER_TOKEN}",
         "Content-Type": "application/json",
@@ -92,7 +107,7 @@ def lark_add(table_id, fields):
         result = r.json()
         if result.get("code") != 0:
             print(f"❌ Lark error {result.get('code')}: {result.get('msg')}")
-            print(f"🔍 Fields yang dikirim: {fields}")
+            print(f"🔍 Fields dikirim: {fields}")
         return result
     except Exception as e:
         print(f"❌ Lark request error: {e}")
@@ -108,10 +123,10 @@ def lark_add_batch(table_id, records_list):
         result = r.json()
         if result.get("code") != 0:
             print(f"❌ Lark batch error {result.get('code')}: {result.get('msg')}")
-            print(f"🔍 Sample record: {records_list[0] if records_list else 'kosong'}")
+            print(f"🔍 Sample: {records_list[0]}")
         return result
     except Exception as e:
-        print(f"❌ Lark batch request error: {e}")
+        print(f"❌ Lark batch error: {e}")
         return {"code": -1}
 
 # ============================================================
@@ -120,92 +135,88 @@ def lark_add_batch(table_id, records_list):
 
 def fetch_all_shopee_data():
     print("📥 Mengambil semua data Shopee...")
-    today = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp())
-    now = int(time.time())
+    today    = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp())
+    now      = int(time.time())
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     data = {}
     data["shop_info"]        = shopee_get("/api/v2/shop/get_shop_info")
     data["shop_perf"]        = shopee_get("/api/v2/account_health/get_shop_performance")
     data["orders"]           = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time",
-        "time_from": today,
-        "time_to": now,
-        "page_size": 100,
+        "time_range_field": "create_time", "time_from": today,
+        "time_to": now, "page_size": 100,
     })
     data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time",
-        "time_from": today,
-        "time_to": now,
-        "page_size": 100,
-        "order_status": "CANCELLED",
+        "time_range_field": "create_time", "time_from": today,
+        "time_to": now, "page_size": 100, "order_status": "CANCELLED",
     })
     data["returns"]          = shopee_get("/api/v2/returns/get_return_list", {
-        "page_no": 1,
-        "page_size": 100,
-        "create_time_from": today,
-        "create_time_to": now,
+        "page_no": 1, "page_size": 100,
+        "create_time_from": today, "create_time_to": now,
     })
     data["income"]           = shopee_get("/api/v2/payment/get_income_overview", {
-        "start_date": date_str,
-        "end_date": date_str,
+        "start_date": date_str, "end_date": date_str,
     })
     data["balance"]          = shopee_get("/api/v2/ads/get_total_balance")
     data["penalty"]          = shopee_get("/api/v2/account_health/get_penalty_point_history")
     data["late_orders"]      = shopee_get("/api/v2/account_health/get_late_orders")
     data["issues"]           = shopee_get("/api/v2/account_health/get_listings_with_issues")
     data["ads"]              = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
-        "start_date": date_str,
-        "end_date": date_str,
+        "start_date": date_str, "end_date": date_str,
     })
     items_resp               = shopee_get("/api/v2/product/get_item_list", {
-        "offset": 0,
-        "page_size": 50,
-        "item_status": "NORMAL",
+        "offset": 0, "page_size": 50, "item_status": "NORMAL",
     })
     data["items"] = items_resp.get("item", []) if isinstance(items_resp, dict) else []
+
+    # DEBUG: print raw responses untuk diagnosa
+    print("🔍 RAW income:", repr(data["income"])[:120])
+    print("🔍 RAW balance:", repr(data["balance"])[:120])
+    print("🔍 RAW shop_info keys:", list(data["shop_info"].keys()) if isinstance(data["shop_info"], dict) else repr(data["shop_info"])[:80])
 
     print("✅ Data Shopee berhasil diambil!")
     return data
 
 # ============================================================
 # INPUT KE LARK BASE
-# Semua field angka = safe_int() karena tipe Number di Lark
 # ============================================================
 
 def input_daily_overview(d):
     print("📋 Input Daily Overview...")
-
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
 
-    overall_perf = d["shop_perf"].get("overall_performance", {})
-    if not isinstance(overall_perf, dict):
-        overall_perf = {}
+    # Akses semua sub-dict dengan safe_dict agar tidak crash kalau None/list
+    shop_perf    = safe_dict(d, "shop_perf")
+    overall_perf = safe_dict(shop_perf, "overall_performance")
+    income       = safe_dict(d, "income")
+    shop_info    = safe_dict(d, "shop_info")
+    penalty      = safe_dict(d, "penalty")
+    late_orders  = safe_dict(d, "late_orders")
+    issues       = safe_dict(d, "issues")
+    balance      = safe_dict(d, "balance")
 
-    all_orders       = d["orders"].get("order_list", [])
-    cancelled_orders = d["cancelled_orders"].get("order_list", [])
-
-    # Skor Performa Toko = tipe Number di Lark → kirim angka 1-4, bukan string
-    skor_performa = safe_int(overall_perf.get("rating", 0))  # 1=Poor, 2=Improvement, 3=Good, 4=Excellent
+    all_orders       = safe_list(d.get("orders", {}),           "order_list")
+    cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
+    returns_list     = safe_list(d.get("returns", {}),          "return_list")
 
     fields = {
         "Tanggal":                today_ms,
         "Platform":               "Shopee",
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
-        "Total Retur":            safe_int(len(d["returns"].get("return_list", []))),
-        "Omzet Harian":           safe_int(d["income"].get("total_income", 0)),
-        "Follower Toko":          safe_int(d["shop_info"].get("follower_count", 0)),
-        "Skor Performa Toko":     skor_performa,  # FIX: int bukan string
-        "Poin Penalti":           safe_int(d["penalty"].get("total_penalty_point", 0)),
-        "Order Terlambat":        safe_int(d["late_orders"].get("total_count", 0)),
-        "Produk Bermasalah":      safe_int(d["issues"].get("total_count", 0)),
-        "Saldo Iklan":            safe_int(d["balance"].get("total_balance", 0)),
+        "Total Retur":            safe_int(len(returns_list)),
+        "Omzet Harian":           safe_int(income.get("total_income", 0)),
+        "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
+        "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
+        "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
+        "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
+        "Produk Bermasalah":      safe_int(issues.get("total_count", 0)),
+        "Saldo Iklan":            safe_int(balance.get("total_balance", 0)),
     }
-    # DEBUG: print semua field dan tipenya sebelum kirim
+
     print("🔍 DEBUG Daily Overview fields:")
     for k, v in fields.items():
-        print(f"   {k}: {repr(v)} (type={type(v).__name__})")
+        print(f"   {k}: {repr(v)} ({type(v).__name__})")
 
     result = lark_add(TABLE_DAILY_OVERVIEW, fields)
     print("✅ Daily Overview done!" if result.get("code") == 0 else "❌ Gagal")
@@ -224,9 +235,7 @@ def input_product_performance(items):
             continue
         item_id = item.get("item_id")
         comment_resp = shopee_get("/api/v2/product/get_comment", {
-            "item_id": item_id,
-            "cursor": "",
-            "page_size": 100,
+            "item_id": item_id, "cursor": "", "page_size": 100,
         })
         comments = comment_resp.get("comment_list", [])
         if not isinstance(comments, list):
@@ -235,44 +244,41 @@ def input_product_performance(items):
         star = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
         for c in comments:
             if isinstance(c, dict):
-                r = safe_int(c.get("rating_star", 0))
-                if r in star:
-                    star[r] += 1
+                rv = safe_int(c.get("rating_star", 0))
+                if rv in star:
+                    star[rv] += 1
 
-        # Rating Bintang pakai Number biasa (desimal) → kirim sebagai int juga
-        # misal rata-rata 4.5 → simpan sebagai 45 (×10) ATAU bulatkan ke int
         avg = sum(k * v for k, v in star.items()) // len(comments) if comments else 0
 
         records.append({
-            "Tanggal":            today_ms,
-            "Platform":           "Shopee",
-            "Nama Produk":        safe_str(item.get("item_name", "")),
-            "Item ID":            safe_str(item_id),
-            "Rating Bintang":     safe_int(avg),
-            "Total Review":       safe_int(len(comments)),
-            "Review Bintang 5":   safe_int(star[5]),
-            "Review Bintang 4":   safe_int(star[4]),
-            "Review Bintang 3":   safe_int(star[3]),
-            "Review Bintang 2":   safe_int(star[2]),
-            "Review Bintang 1":   safe_int(star[1]),
+            "Tanggal":             today_ms,
+            "Platform":            "Shopee",
+            "Nama Produk":         safe_str(item.get("item_name", "")),
+            "Item ID":             safe_str(item_id),
+            "Rating Bintang":      safe_int(avg),
+            "Total Review":        safe_int(len(comments)),
+            "Review Bintang 5":    safe_int(star[5]),
+            "Review Bintang 4":    safe_int(star[4]),
+            "Review Bintang 3":    safe_int(star[3]),
+            "Review Bintang 2":    safe_int(star[2]),
+            "Review Bintang 1":    safe_int(star[1]),
             "Review Negatif Baru": safe_int(star[1] + star[2]),
         })
 
     if records:
         result = lark_add_batch(TABLE_PRODUCT_PERF, records)
-        print(f"✅ Product Performance done {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
+        print(f"✅ Product Performance {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
 
 def input_ads_shop(d):
     print("📢 Input Ads Shop Level...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
-    ads = d.get("ads") or {}
-    if not isinstance(ads, dict):
-        ads = {}
+    ads     = safe_dict(d, "ads")
+    balance = safe_dict(d, "balance")
 
     fields = {
         "Tanggal":                today_ms,
         "Platform":               "Shopee",
-        "Saldo Iklan":            safe_int(d["balance"].get("total_balance", 0)),
+        "Saldo Iklan":            safe_int(balance.get("total_balance", 0)),
         "Total Spend":            safe_int(ads.get("cost", 0)),
         "Total Impresi":          safe_int(ads.get("impression", 0)),
         "Total Klik":             safe_int(ads.get("click", 0)),
@@ -285,16 +291,15 @@ def input_ads_shop(d):
 def input_financial(d):
     print("💰 Input Financial Summary...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
-    ads = d.get("ads") or {}
-    if not isinstance(ads, dict):
-        ads = {}
+    income  = safe_dict(d, "income")
+    ads     = safe_dict(d, "ads")
 
     fields = {
-        "Tanggal":       today_ms,
-        "Platform":      "Shopee",
-        "Gross Revenue": safe_int(d["income"].get("total_income", 0)),
-        "Biaya Platform": safe_int(d["income"].get("escrow_amount", 0)),
-        "Spend Iklan":   safe_int(ads.get("cost", 0)),
+        "Tanggal":        today_ms,
+        "Platform":       "Shopee",
+        "Gross Revenue":  safe_int(income.get("total_income", 0)),
+        "Biaya Platform": safe_int(income.get("escrow_amount", 0)),
+        "Spend Iklan":    safe_int(ads.get("cost", 0)),
     }
     result = lark_add(TABLE_FINANCIAL, fields)
     print("✅ Financial Summary done!" if result.get("code") == 0 else "❌ Gagal")
@@ -302,58 +307,50 @@ def input_financial(d):
 def input_alerts(d):
     print("🚨 Cek dan input Alert Log...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
-    alerts = []
+    balance  = safe_dict(d, "balance")
+    penalty  = safe_dict(d, "penalty")
+    issues   = safe_dict(d, "issues")
+    late     = safe_dict(d, "late_orders")
+    alerts   = []
 
-    saldo = safe_int(d["balance"].get("total_balance", 0))
+    saldo = safe_int(balance.get("total_balance", 0))
     if saldo < 100000:
         alerts.append({
-            "Tanggal":        today_ms,
-            "Platform":       "Shopee",
-            "Tipe Alert":     "Iklan Hampir Habis",
-            "Detail":         f"Saldo iklan Rp {saldo:,} — segera top up!",
-            "Nilai Saat Ini": saldo,
-            "Nilai Normal":   100000,
-            "Prioritas":      "🔴 Kritis",
-            "Status":         "Baru",
+            "Tanggal": today_ms, "Platform": "Shopee",
+            "Tipe Alert": "Iklan Hampir Habis",
+            "Detail": f"Saldo iklan Rp {saldo:,} — segera top up!",
+            "Nilai Saat Ini": saldo, "Nilai Normal": 100000,
+            "Prioritas": "🔴 Kritis", "Status": "Baru",
         })
 
-    penalty = safe_int(d["penalty"].get("total_penalty_point", 0))
-    if penalty > 0:
+    pen = safe_int(penalty.get("total_penalty_point", 0))
+    if pen > 0:
         alerts.append({
-            "Tanggal":        today_ms,
-            "Platform":       "Shopee",
-            "Tipe Alert":     "Penalti",
-            "Detail":         f"Toko dapat {penalty} poin penalti!",
-            "Nilai Saat Ini": penalty,
-            "Nilai Normal":   0,
-            "Prioritas":      "🔴 Kritis",
-            "Status":         "Baru",
+            "Tanggal": today_ms, "Platform": "Shopee",
+            "Tipe Alert": "Penalti",
+            "Detail": f"Toko dapat {pen} poin penalti!",
+            "Nilai Saat Ini": pen, "Nilai Normal": 0,
+            "Prioritas": "🔴 Kritis", "Status": "Baru",
         })
 
-    issues = safe_int(d["issues"].get("total_count", 0))
-    if issues > 0:
+    isu = safe_int(issues.get("total_count", 0))
+    if isu > 0:
         alerts.append({
-            "Tanggal":        today_ms,
-            "Platform":       "Shopee",
-            "Tipe Alert":     "Produk Bermasalah",
-            "Detail":         f"{issues} produk bermasalah/melanggar kebijakan.",
-            "Nilai Saat Ini": issues,
-            "Nilai Normal":   0,
-            "Prioritas":      "🟡 Penting",
-            "Status":         "Baru",
+            "Tanggal": today_ms, "Platform": "Shopee",
+            "Tipe Alert": "Produk Bermasalah",
+            "Detail": f"{isu} produk bermasalah.",
+            "Nilai Saat Ini": isu, "Nilai Normal": 0,
+            "Prioritas": "🟡 Penting", "Status": "Baru",
         })
 
-    late = safe_int(d["late_orders"].get("total_count", 0))
-    if late > 5:
+    terlambat = safe_int(late.get("total_count", 0))
+    if terlambat > 5:
         alerts.append({
-            "Tanggal":        today_ms,
-            "Platform":       "Shopee",
-            "Tipe Alert":     "Order Terlambat",
-            "Detail":         f"{late} order terlambat diproses hari ini.",
-            "Nilai Saat Ini": late,
-            "Nilai Normal":   5,
-            "Prioritas":      "🟡 Penting",
-            "Status":         "Baru",
+            "Tanggal": today_ms, "Platform": "Shopee",
+            "Tipe Alert": "Order Terlambat",
+            "Detail": f"{terlambat} order terlambat.",
+            "Nilai Saat Ini": terlambat, "Nilai Normal": 5,
+            "Prioritas": "🟡 Penting", "Status": "Baru",
         })
 
     if alerts:
@@ -372,9 +369,9 @@ def main():
     print("=" * 60)
 
     if not LARK_USER_TOKEN:
-        raise Exception("❌ LARK_USER_TOKEN tidak ada! Tambahkan ke GitHub Secrets.")
+        raise Exception("❌ LARK_USER_TOKEN tidak ada!")
 
-    print(f"✅ Lark user token tersedia")
+    print("✅ Lark user token tersedia")
 
     data = fetch_all_shopee_data()
 
