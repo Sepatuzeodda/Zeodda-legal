@@ -198,7 +198,43 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         hashlib.sha256
     ).hexdigest()
 
-TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "")
+TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "").strip()
+
+def tiktok_fetch_shop_cipher() -> str:
+    """Fetch shop_cipher dari authorized shops jika belum ada."""
+    global TIKTOK_SHOP_CIPHER
+    if TIKTOK_SHOP_CIPHER:
+        return TIKTOK_SHOP_CIPHER
+    path = "/authorization/202309/shops"
+    params = {
+        "app_key":   TIKTOK_APP_KEY,
+        "timestamp": str(int(time.time())),
+    }
+    excluded = {"sign"}
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in excluded)
+    base = TIKTOK_APP_SECRET + path + sorted_str + TIKTOK_APP_SECRET
+    params["sign"] = hmac.new(
+        TIKTOK_APP_SECRET.encode("utf-8"),
+        base.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    headers = {
+        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, headers=headers, timeout=30)
+        data = r.json()
+        print(f"🔍 fetch_shop_cipher: code={data.get('code')} msg={data.get('message','')[:80]}")
+        if data.get("code") == 0:
+            shops = data.get("data", {}).get("shops", [])
+            if shops:
+                TIKTOK_SHOP_CIPHER = shops[0].get("cipher", "")
+                print(f"✅ shop_cipher ditemukan: {TIKTOK_SHOP_CIPHER[:15]}...")
+                return TIKTOK_SHOP_CIPHER
+    except Exception as e:
+        print(f"❌ fetch_shop_cipher error: {e}")
+    return ""
 
 def tiktok_base_params() -> dict:
     """Parameter wajib untuk TikTok Shop API."""
@@ -339,6 +375,7 @@ def fetch_all_shopee_data():
 
 def fetch_all_tiktok_data():
     print("\n📥 Mengambil semua data TikTok Shop...")
+    tiktok_fetch_shop_cipher()  # pastikan cipher tersedia
 
     # Rentang waktu: kemarin 00:00 → 23:59:59
     yesterday = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
