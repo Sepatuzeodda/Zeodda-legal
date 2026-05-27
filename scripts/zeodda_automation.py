@@ -34,7 +34,7 @@ TIKTOK_TOKEN_URL     = "https://auth.tiktok-shops.com/api/v2/token/get"
 
 LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
 LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
-LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
+LARK_APP_TOKEN  = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
 LARK_BASE_URL   = "https://open.larksuite.com"
 
 # Cache tenant token dalam satu run (valid 2 jam, lebih dari cukup)
@@ -64,14 +64,14 @@ def get_lark_tenant_token() -> str:
     except Exception as e:
         raise Exception(f"❌ get_lark_tenant_token error: {e}")
 
-TABLE_DAILY_OVERVIEW = "tblOIk5Rv5wTrbOM"
-TABLE_PRODUCT_PERF   = "tbl1TS2Hk26v5HB1"
-TABLE_ADS_SHOP       = "tblxgI3Ia1YmCR6L"
-TABLE_ADS_PRODUCT    = "tblpy5kqHrSPaoxk"
-TABLE_KOMPARASI      = "tbljsQISLBtRDkeh"
-TABLE_SOCIAL_MEDIA   = "tbllk68BO9607IO4"
-TABLE_FINANCIAL      = "tbl2Or8DO3wywwxn"
-TABLE_ALERT_LOG      = "tblCutzEM4Bp0DmN"
+TABLE_DAILY_OVERVIEW = "tblSVQG08nHr7tXD"
+TABLE_PRODUCT_PERF   = "tblRlDzWXK5gQXzT"
+TABLE_ADS_SHOP       = "tbl6EhWSzZumBR4L"
+TABLE_ADS_PRODUCT    = "tbl3r112gUTEhHCe"
+TABLE_KOMPARASI      = "tblZoIIwUj0RN93p"
+TABLE_SOCIAL_MEDIA   = "tblkQ9voE785tQ1i"
+TABLE_FINANCIAL      = "tblLh7liZZxPzEpl"
+TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 
 # ============================================================
 # SAFE TYPE HELPERS
