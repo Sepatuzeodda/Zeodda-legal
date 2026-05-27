@@ -100,6 +100,7 @@ def lark_add(table_id, fields):
         result = r.json()
         if result.get("code") != 0:
             print(f"❌ Lark error {result.get('code')}: {result.get('msg')}")
+            print(f"🔍 Fields yang dikirim: {fields}")
         return result
     except Exception as e:
         print(f"❌ Lark request error: {e}")
