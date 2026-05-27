@@ -36,15 +36,9 @@ LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
 LARK_APP_TOKEN  = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
 LARK_BASE_URL   = "https://open.larksuite.com"
 
-# Cache tenant token dalam satu run (valid 2 jam, lebih dari cukup)
 _lark_tenant_token = None
 
 def get_lark_tenant_token() -> str:
-    """
-    Generate tenant access token dari App ID + App Secret.
-    Token ini tidak pernah expired selama script jalan — di-refresh otomatis tiap run.
-    Tidak perlu copy-paste token manual ke GitHub Secrets.
-    """
     global _lark_tenant_token
     if _lark_tenant_token:
         return _lark_tenant_token
@@ -77,7 +71,6 @@ TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 # ============================================================
 
 def safe_int(val):
-    """Semua field angka di Lark = Number Thousands separator → harus int"""
     if val is None:
         return 0
     if isinstance(val, (dict, list)):
@@ -95,14 +88,12 @@ def safe_str(val):
     return str(val)
 
 def safe_dict(d, key):
-    """Get a sub-dict safely, always returns dict"""
     if not isinstance(d, dict):
         return {}
     v = d.get(key, {})
     return v if isinstance(v, dict) else {}
 
 def safe_list(d, key):
-    """Get a list from dict safely, always returns list"""
     if not isinstance(d, dict):
         return []
     v = d.get(key, [])
@@ -174,19 +165,33 @@ def lark_add_batch(table_id, records_list):
         print(f"❌ Lark batch error: {e}")
         return {"code": -1}
 
+def lark_add_debug(table_id, fields):
+    """
+    Kirim field satu per satu untuk debug FieldNameNotFound.
+    Return field mana yang sukses dan mana yang gagal.
+    """
+    print(f"🔬 DEBUG MODE: Kirim {len(fields)} field satu per satu...")
+    failed = []
+    ok = []
+    for key, val in fields.items():
+        result = lark_add(table_id, {key: val})
+        if result.get("code") != 0:
+            print(f"  ❌ FIELD GAGAL: '{key}' = {repr(val)}")
+            failed.append(key)
+        else:
+            ok.append(key)
+    print(f"  ✅ OK: {ok}")
+    print(f"  ❌ GAGAL: {failed}")
+    return failed
+
 # ============================================================
-# TIKTOK SHOP HELPERS
+# TIKTOK SHOP HELPERS (minimal, skip untuk sekarang)
 # ============================================================
 
+TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "").strip()
+
 def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
-    """
-    HMAC-SHA256 untuk TikTok Shop API v202309.
-    Format: app_secret + path + params_string + app_secret
-    TIDAK perlu sort params — pakai urutan asli.
-    Exclude: sign, access_token
-    """
     excluded = {"sign", "access_token"}
-    # TIDAK sort — pakai urutan asli params
     params_str = "".join(
         f"{k}{v}"
         for k, v in params.items()
@@ -198,69 +203,9 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
         base.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
-    print(f"🔐 sign params: {[k for k in params if k not in excluded]} base_len={len(base)}")
     return sign
 
-TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "").strip()
-
-def tiktok_fetch_shop_cipher() -> str:
-    """Fetch shop_cipher dari shop info endpoint."""
-    global TIKTOK_SHOP_CIPHER
-    if TIKTOK_SHOP_CIPHER:
-        return TIKTOK_SHOP_CIPHER
-    path = "/shop/202309/shops"
-    params = {
-        "app_key":   TIKTOK_APP_KEY,
-        "timestamp": str(int(time.time())),
-    }
-    excluded = {"sign"}
-    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()) if k not in excluded)
-    base = TIKTOK_APP_SECRET + path + sorted_str + TIKTOK_APP_SECRET
-    params["sign"] = hmac.new(
-        TIKTOK_APP_SECRET.encode("utf-8"),
-        base.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    headers = {
-        "x-tts-access-token": TIKTOK_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-    }
-    try:
-        r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, headers=headers, timeout=30)
-        data = r.json()
-        print(f"🔍 fetch_shop_cipher [shop/202309/shops]: code={data.get('code')} msg={data.get('message','')[:80]}")
-        if data.get("code") == 0:
-            shops = data.get("data", {}).get("shops", [])
-            if shops:
-                TIKTOK_SHOP_CIPHER = shops[0].get("cipher", "")
-                print(f"✅ shop_cipher: {TIKTOK_SHOP_CIPHER[:15]}...")
-                return TIKTOK_SHOP_CIPHER
-        # Coba endpoint alternatif
-        path2 = "/seller/202309/shops"
-        params2 = {
-            "app_key":   TIKTOK_APP_KEY,
-            "timestamp": str(int(time.time())),
-        }
-        sorted_str2 = "".join(f"{k}{v}" for k, v in sorted(params2.items()) if k not in excluded)
-        base2 = TIKTOK_APP_SECRET + path2 + sorted_str2 + TIKTOK_APP_SECRET
-        params2["sign"] = hmac.new(TIKTOK_APP_SECRET.encode("utf-8"), base2.encode("utf-8"), hashlib.sha256).hexdigest()
-        r2 = requests.get(f"{TIKTOK_BASE_URL}{path2}", params=params2, headers=headers, timeout=30)
-        data2 = r2.json()
-        print(f"🔍 fetch_shop_cipher [seller/202309/shops]: code={data2.get('code')} msg={data2.get('message','')[:80]}")
-        if data2.get("code") == 0:
-            shops2 = data2.get("data", {}).get("shops", [])
-            if shops2:
-                TIKTOK_SHOP_CIPHER = shops2[0].get("cipher", "")
-                print(f"✅ shop_cipher: {TIKTOK_SHOP_CIPHER[:15]}...")
-                return TIKTOK_SHOP_CIPHER
-    except Exception as e:
-        print(f"❌ fetch_shop_cipher error: {e}")
-    return ""
-
 def tiktok_base_params() -> dict:
-    """Parameter wajib untuk TikTok Shop API v202309.
-    access_token TIDAK di query params — hanya di header x-tts-access-token.
-    """
     params = {
         "app_key":   TIKTOK_APP_KEY,
         "timestamp": str(int(time.time())),
@@ -272,7 +217,6 @@ def tiktok_base_params() -> dict:
     return params
 
 def tiktok_refresh_token() -> bool:
-    """Refresh access token. Kembalikan True jika berhasil."""
     global TIKTOK_ACCESS_TOKEN, TIKTOK_REFRESH_TOKEN
     params = {
         "app_key":       TIKTOK_APP_KEY,
@@ -287,8 +231,6 @@ def tiktok_refresh_token() -> bool:
             TIKTOK_ACCESS_TOKEN  = data["data"]["access_token"]
             TIKTOK_REFRESH_TOKEN = data["data"]["refresh_token"]
             print("🔄 TikTok token refreshed!")
-            # ⚠️ CATATAN: Token baru tidak otomatis tersimpan ke GitHub Secrets.
-            # Simpan manual atau tambahkan gh CLI call di sini jika diperlukan.
             return True
         else:
             print(f"❌ Token refresh gagal: {data}")
@@ -298,7 +240,6 @@ def tiktok_refresh_token() -> bool:
         return False
 
 def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
-    """GET request ke TikTok Shop API."""
     params = tiktok_base_params()
     params.update(extra)
     params["sign"] = tiktok_sign(path, params)
@@ -311,7 +252,6 @@ def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
         data = r.json()
         print(f"🔍 TikTok GET [{path}] raw: code={data.get('code')} msg={data.get('message','')[:80]}")
         if data.get("code") in (40001, 40002, 40003) and _retry:
-            print("⚠️ TikTok token expired, mencoba refresh...")
             if tiktok_refresh_token():
                 return tiktok_get(path, extra, _retry=False)
         if data.get("code") != 0:
@@ -322,7 +262,6 @@ def tiktok_get(path: str, extra: dict = {}, _retry: bool = True) -> dict:
         return {}
 
 def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = True) -> dict:
-    """POST request ke TikTok Shop API."""
     params = tiktok_base_params()
     params.update(extra)
     params["sign"] = tiktok_sign(path, params)
@@ -335,7 +274,6 @@ def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = Tru
         data = r.json()
         print(f"🔍 TikTok POST [{path}] raw: code={data.get('code')} msg={data.get('message','')[:80]}")
         if data.get("code") in (40001, 40002, 40003) and _retry:
-            print("⚠️ TikTok token expired, mencoba refresh...")
             if tiktok_refresh_token():
                 return tiktok_post(path, body, extra, _retry=False)
         if data.get("code") != 0:
@@ -351,28 +289,48 @@ def tiktok_post(path: str, body: dict = {}, extra: dict = {}, _retry: bool = Tru
 
 def fetch_all_shopee_data():
     print("📥 Mengambil semua data Shopee...")
-    today    = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp())
-    now      = int(time.time())
-    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Rentang waktu hari ini (WIB = UTC+7)
+    # GitHub Actions jalan di UTC, jadi kita set range hari ini UTC+7
+    now_wib      = datetime.utcnow() + timedelta(hours=7)
+    today_wib    = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+    ts_start     = int((today_wib - timedelta(hours=7)).timestamp())  # convert back ke UTC epoch
+    ts_end       = int((today_wib + timedelta(hours=17) - timedelta(seconds=1)).timestamp())  # 23:59:59 WIB
+    date_str     = today_wib.strftime("%Y-%m-%d")
+
+    print(f"📅 Rentang waktu: {today_wib.strftime('%Y-%m-%d')} WIB ({ts_start} → {ts_end})")
 
     data = {}
     data["shop_info"]        = shopee_get("/api/v2/shop/get_shop_info")
     data["shop_perf"]        = shopee_get("/api/v2/account_health/get_shop_performance")
+
+    # Semua order hari ini
     data["orders"]           = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time", "time_from": today,
-        "time_to": now, "page_size": 100,
+        "time_range_field": "create_time",
+        "time_from": ts_start,
+        "time_to": ts_end,
+        "page_size": 100,
     })
+
+    # Order dibatalkan hari ini
     data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time", "time_from": today,
-        "time_to": now, "page_size": 100, "order_status": "CANCELLED",
+        "time_range_field": "create_time",
+        "time_from": ts_start,
+        "time_to": ts_end,
+        "page_size": 100,
+        "order_status": "CANCELLED",
     })
+
     data["returns"]          = shopee_get("/api/v2/returns/get_return_list", {
         "page_no": 1, "page_size": 100,
-        "create_time_from": today, "create_time_to": now,
+        "create_time_from": ts_start, "create_time_to": ts_end,
     })
+
+    # Income overview untuk Biaya Platform saja (bukan omzet)
     data["income"]           = shopee_get("/api/v2/payment/get_income_overview", {
         "start_date": date_str, "end_date": date_str,
     })
+
     data["balance"]          = shopee_get("/api/v2/ads/get_total_balance")
     data["penalty"]          = shopee_get("/api/v2/account_health/get_penalty_point_history")
     data["late_orders"]      = shopee_get("/api/v2/account_health/get_late_orders")
@@ -380,14 +338,48 @@ def fetch_all_shopee_data():
     data["ads"]              = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
         "start_date": date_str, "end_date": date_str,
     })
-    items_resp               = shopee_get("/api/v2/product/get_item_list", {
+
+    items_resp = shopee_get("/api/v2/product/get_item_list", {
         "offset": 0, "page_size": 50, "item_status": "NORMAL",
     })
     data["items"] = items_resp.get("item", []) if isinstance(items_resp, dict) else []
 
-    print("🔍 RAW income:", repr(data["income"])[:120])
-    print("🔍 RAW balance:", repr(data["balance"])[:120])
-    print("🔍 RAW shop_info keys:", list(data["shop_info"].keys()) if isinstance(data["shop_info"], dict) else repr(data["shop_info"])[:80])
+    # === Hitung Omzet Harian dari order list (bukan income overview) ===
+    # Ambil detail order untuk dapat total_amount per order
+    all_orders = safe_list(data.get("orders", {}), "order_list")
+    order_sn_list = [o.get("order_sn") for o in all_orders if o.get("order_sn")]
+
+    omzet_harian = 0
+    order_details_map = {}
+
+    if order_sn_list:
+        print(f"  → Fetching detail {len(order_sn_list)} order untuk omzet...")
+        # Shopee limit 50 order per request
+        for i in range(0, len(order_sn_list), 50):
+            batch = order_sn_list[i:i+50]
+            detail_resp = shopee_get("/api/v2/order/get_order_detail", {
+                "order_sn_list": ",".join(batch),
+                "response_optional_fields": "buyer_user_id,total_amount,item_list",
+            })
+            order_list = detail_resp.get("order_list", [])
+            if not isinstance(order_list, list):
+                order_list = []
+            for od in order_list:
+                if not isinstance(od, dict):
+                    continue
+                sn = od.get("order_sn", "")
+                order_details_map[sn] = od
+                status = od.get("order_status", "")
+                if status not in ("CANCELLED", "UNPAID"):
+                    omzet_harian += safe_int(od.get("total_amount", 0))
+
+    data["omzet_harian"] = omzet_harian
+    data["order_details_map"] = order_details_map
+
+    print(f"🔍 RAW income: {repr(data['income'])[:120]}")
+    print(f"🔍 RAW balance: {repr(data['balance'])[:120]}")
+    print(f"🔍 RAW shop_info keys: {list(data['shop_info'].keys()) if isinstance(data['shop_info'], dict) else repr(data['shop_info'])[:80]}")
+    print(f"💰 Omzet Harian (dari order detail): Rp {omzet_harian:,} dari {len(order_sn_list)} order")
     print("✅ Data Shopee berhasil diambil!")
     return data
 
@@ -397,17 +389,14 @@ def fetch_all_shopee_data():
 
 def fetch_all_tiktok_data():
     print("\n📥 Mengambil semua data TikTok Shop...")
-    tiktok_fetch_shop_cipher()  # pastikan cipher tersedia
 
-    # Rentang waktu: kemarin 00:00 → 23:59:59
     yesterday = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     ts_start  = int(yesterday.timestamp())
-    ts_end    = ts_start + 86399  # +23j59m59d
+    ts_end    = ts_start + 86399
     date_str  = yesterday.strftime("%Y-%m-%d")
 
     data = {}
 
-    # --- Orders (v202309) ---
     print("  → Fetching orders...")
     orders_resp = tiktok_post("/order/202309/orders/search", body={
         "create_time_ge": ts_start,
@@ -416,7 +405,6 @@ def fetch_all_tiktok_data():
     })
     data["orders"] = orders_resp.get("orders", []) if orders_resp else []
 
-    # --- Order details (v202309) ---
     print("  → Fetching order details...")
     order_ids = [o["id"] for o in data["orders"] if o.get("id")]
     all_details = []
@@ -427,7 +415,6 @@ def fetch_all_tiktok_data():
         all_details.extend(detail_resp.get("orders", []) if detail_resp else [])
     data["order_details"] = all_details
 
-    # --- Products (v202309) ---
     print("  → Fetching products...")
     all_products = []
     page_token = ""
@@ -445,7 +432,6 @@ def fetch_all_tiktok_data():
             break
     data["products"] = all_products
 
-    # --- Finance (v202309) ---
     print("  → Fetching finance...")
     finance_resp = tiktok_get("/finance/202309/statements", {
         "create_time_ge": str(ts_start),
@@ -481,13 +467,16 @@ def input_daily_overview(d):
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
     returns_list     = safe_list(d.get("returns", {}),          "return_list")
 
+    # Omzet dari order detail (bukan income overview)
+    omzet = d.get("omzet_harian", 0)
+
     fields = {
         "Tanggal":                today_ms,
         "Platform":               "Shopee",
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
         "Total Retur":            safe_int(len(returns_list)),
-        "Omzet Harian":           safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Omzet Harian":           safe_int(omzet),
         "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
@@ -506,11 +495,17 @@ def input_daily_overview(d):
 def input_product_performance(items):
     print("⭐ Input Product Performance (Shopee)...")
     if not items:
-        print("⚠️ Tidak ada produk di sandbox, skip.")
+        print("⚠️ Tidak ada produk, skip.")
         return
 
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
+
+    # Field yang boleh dikirim ke Lark (exclude formula fields)
+    # Sesuai tabel Product Performance
+    EXCLUDED_FIELDS = set()  # Tambahkan nama field formula di sini kalau sudah diset
+
     records = []
+    debug_done = False  # hanya debug record pertama
 
     for item in items[:20]:
         if not isinstance(item, dict):
@@ -532,16 +527,35 @@ def input_product_performance(items):
 
         avg = sum(k * v for k, v in star.items()) // len(comments) if comments else 0
 
-        records.append({
+        # Fetch item detail untuk nama produk dan harga
+        item_detail = shopee_get("/api/v2/product/get_item_base_info", {
+            "item_id_list": str(item_id),
+        })
+        item_info_list = item_detail.get("item_list", []) if isinstance(item_detail, dict) else []
+        item_info = item_info_list[0] if item_info_list else {}
+
+        nama_produk = safe_str(item_info.get("item_name", item.get("item_name", "")))
+        # Ambil harga dari model pertama
+        models = item_info.get("model", []) or []
+        harga = 0
+        stok = 0
+        for m in models:
+            if isinstance(m, dict):
+                price_info = m.get("price_info", [])
+                if price_info and isinstance(price_info, list):
+                    harga = safe_int(price_info[0].get("current_price", 0))
+                stok += safe_int(m.get("stock_info", {}).get("total_available_stock", 0) if isinstance(m.get("stock_info"), dict) else 0)
+
+        record = {
             "Tanggal":               today_ms,
             "Platform":              "Shopee",
-            "Nama Produk":           safe_str(item.get("item_name", "")),
+            "Nama Produk":           nama_produk,
             "Item ID":               safe_str(item_id),
             "Kategori Produk":       "",
-            "Harga Jual":            0,
-            "Stok Tersisa":          0,
+            "Harga Jual":            harga,
+            "Stok Tersisa":          stok,
             "Terjual Hari Ini":      0,
-            "Total Terjual Kumulatif": 0,
+            "Total Terjual Kumulatif": safe_int(item_info.get("sold", 0)),
             "Rating Bintang":        safe_int(avg),
             "Total Review":          safe_int(len(comments)),
             "Review Bintang 5":      safe_int(star[5]),
@@ -553,15 +567,55 @@ def input_product_performance(items):
             "Views Produk":          0,
             "Status Boost":          "",
             "Ada Promo Aktif":       False,
-            "Status Produk":         "",
+            "Status Produk":         safe_str(item_info.get("item_status", "")),
             "Revenue Produk":        0,
             "CTR Listing":           "",
             "Conversion Rate":       "",
-        })
+        }
+
+        # Exclude formula fields kalau ada
+        for f in EXCLUDED_FIELDS:
+            record.pop(f, None)
+
+        # Debug: kirim record pertama field per field untuk detect masalah
+        if not debug_done and len(records) == 0:
+            print(f"🔬 Debug record pertama (item_id={item_id})...")
+            url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_PRODUCT_PERF}/records"
+            test_result = requests.post(url, headers=get_lark_headers(),
+                json={"fields": record}, timeout=30).json()
+            if test_result.get("code") != 0:
+                print(f"  ❌ Full record gagal: {test_result.get('msg')}")
+                print(f"  → Mencoba kirim field per field...")
+                failed = []
+                for key, val in record.items():
+                    tr = requests.post(url, headers=get_lark_headers(),
+                        json={"fields": {key: val}}, timeout=30).json()
+                    if tr.get("code") != 0:
+                        print(f"    ❌ FIELD GAGAL: '{key}' = {repr(val)} → {tr.get('msg')}")
+                        failed.append(key)
+                    else:
+                        print(f"    ✅ OK: '{key}'")
+                if failed:
+                    print(f"  ⚠️ Field bermasalah: {failed} — akan di-skip")
+                    for f in failed:
+                        record.pop(f, None)
+                        EXCLUDED_FIELDS.add(f)
+            else:
+                print(f"  ✅ Record pertama OK!")
+            debug_done = True
+
+        records.append(record)
 
     if records:
-        result = lark_add_batch(TABLE_PRODUCT_PERF, records)
-        print(f"✅ Product Performance (Shopee) {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
+        # Bersihkan semua record dari field bermasalah
+        clean_records = []
+        for rec in records:
+            for f in EXCLUDED_FIELDS:
+                rec.pop(f, None)
+            clean_records.append(rec)
+
+        result = lark_add_batch(TABLE_PRODUCT_PERF, clean_records)
+        print(f"✅ Product Performance (Shopee) {len(clean_records)} produk!" if result.get("code") == 0 else "❌ Gagal batch")
 
 def input_ads_shop(d):
     print("📢 Input Ads Shop Level (Shopee)...")
@@ -588,10 +642,13 @@ def input_financial(d):
     income  = safe_dict(d, "income")
     ads     = safe_dict(d, "ads")
 
+    # Omzet dari order detail (hari ini)
+    omzet = d.get("omzet_harian", 0)
+
     fields = {
         "Tanggal":        today_ms,
         "Platform":       "Shopee",
-        "Gross Revenue":  safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Gross Revenue":  safe_int(omzet),
         "Biaya Platform": safe_int((income.get("escrow_amount") or {}).get("released_amount", 0)),
         "Spend Iklan":    safe_int(ads.get("cost", 0)),
     }
@@ -658,15 +715,8 @@ def input_alerts(d):
 # ============================================================
 
 def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
-    """
-    Hitung metrics dari order_details → push ke Daily Overview (Platform: Tiktok).
-    Field names sama persis dengan yang Shopee pakai di tabel yang sama.
-    """
     print("📋 Input Daily Overview (TikTok Shop)...")
-
-    # Timestamp kemarin jam 00:00 dalam ms (konsisten dengan Shopee)
     yesterday_ms = int(yesterday.timestamp() * 1000)
-
     orders         = tiktok_data.get("orders", [])
     order_details  = tiktok_data.get("order_details", [])
     total_orders   = len(orders)
@@ -674,7 +724,6 @@ def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
     if total_orders == 0:
         print("⚠️ Tidak ada order TikTok kemarin, tetap push row 0.")
 
-    # Hitung dari detail order
     cancelled_count = 0
     units_sold      = 0
     total_revenue   = 0
@@ -684,17 +733,14 @@ def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
         if not isinstance(o, dict):
             continue
         status = o.get("status", o.get("order_status", ""))
-        if status == "CANCELLED":
-            cancelled_count += 1
-        # Revenue: payment.total_amount (V2) atau payment_info.total_amount (V1)
         payment = o.get("payment", o.get("payment_info", {})) or {}
         if status not in ("CANCELLED", "UNPAID"):
             total_revenue += safe_int(float(payment.get("total_amount", 0) or 0) / 100)
-        # Units
         for item in (o.get("line_items", o.get("item_list", [])) or []):
             if isinstance(item, dict) and status not in ("CANCELLED",):
                 units_sold += safe_int(item.get("quantity", 0))
-        # Returns
+        if status == "CANCELLED":
+            cancelled_count += 1
         if status in ("RETURN_SUCCESS", "RETURN_REQUEST"):
             returns_count += 1
 
@@ -705,7 +751,6 @@ def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
         "Total Order Dibatalkan": safe_int(cancelled_count),
         "Total Retur":            safe_int(returns_count),
         "Omzet Harian":           safe_int(total_revenue),
-        # Field-field di bawah tidak ada di TikTok API → isi 0 agar tidak error
         "Follower Toko":          0,
         "Skor Performa Toko":     0,
         "Poin Penalti":           0,
@@ -719,15 +764,9 @@ def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
     print("✅ Daily Overview (TikTok) done!" if result.get("code") == 0 else "❌ Gagal")
 
 def input_tiktok_product_performance(tiktok_data, yesterday: datetime):
-    """
-    Fetch detail setiap produk (rating & review) → push ke Product Performance.
-    Field names sama persis dengan Shopee di tabel yang sama.
-    """
     print("⭐ Input Product Performance (TikTok Shop)...")
-
     yesterday_ms = int(yesterday.timestamp() * 1000)
     products = tiktok_data.get("products", [])
-
     if not products:
         print("⚠️ Tidak ada produk TikTok, skip.")
         return
@@ -736,19 +775,12 @@ def input_tiktok_product_performance(tiktok_data, yesterday: datetime):
     for prod in products:
         if not isinstance(prod, dict):
             continue
-
         prod_id   = safe_str(prod.get("id") or prod.get("product_id", ""))
         prod_name = safe_str(prod.get("product_name", ""))
-
-        # Fetch detail produk untuk rating
         detail = tiktok_get("/api/products/details", {"product_id": prod_id}) if prod_id else {}
-
-        # TikTok meletakkan rating di quality_tier_info
         quality      = detail.get("quality_tier_info", {}) or {} if isinstance(detail, dict) else {}
         avg_rating   = safe_int(float(quality.get("average_star_rating", 0) or 0))
         review_count = safe_int(quality.get("review_count", 0))
-
-        # Hitung stok dari SKUs
         skus = (detail.get("skus", []) or []) if isinstance(detail, dict) else []
         if not skus:
             skus = prod.get("skus", []) or []
@@ -760,7 +792,6 @@ def input_tiktok_product_performance(tiktok_data, yesterday: datetime):
             if stock_infos and isinstance(stock_infos[0], dict):
                 total_stock += safe_int(stock_infos[0].get("available_stock", 0))
 
-        # Field names = SAMA PERSIS dengan Shopee (agar satu tabel bisa multi-platform)
         records.append({
             "Tanggal":               yesterday_ms,
             "Platform":              "Tiktok",
@@ -789,33 +820,23 @@ def input_tiktok_product_performance(tiktok_data, yesterday: datetime):
         })
 
     if records:
-        # Batch per 500 (limit Lark)
         for i in range(0, len(records), 500):
             result = lark_add_batch(TABLE_PRODUCT_PERF, records[i:i+500])
             print(f"✅ Product Performance (TikTok) {len(records[i:i+500])} produk!" if result.get("code") == 0 else "❌ Gagal")
 
 def input_tiktok_financial(tiktok_data, yesterday: datetime):
-    """
-    Aggregate transaksi finansial TikTok → push ke Financial Summary.
-    Field names sama persis dengan Shopee.
-    """
     print("💰 Input Financial Summary (TikTok Shop)...")
-
     yesterday_ms = int(yesterday.timestamp() * 1000)
     transactions = tiktok_data.get("finance", [])
-
     gross_revenue  = 0
-    biaya_platform = 0  # commission/fee
-    spend_iklan    = 0  # ads spend (TikTok ads fee jika ada)
+    biaya_platform = 0
+    spend_iklan    = 0
 
     for txn in (transactions or []):
         if not isinstance(txn, dict):
             continue
-        # V2: transaction_type atau type
         txn_type = safe_str(txn.get("transaction_type", txn.get("type", "")))
-        # V2: amount dalam unit terkecil → bagi 100
         amount = safe_int(float(txn.get("amount", 0) or 0) / 100)
-
         if txn_type in ("ORDER", "SALE", "SETTLEMENT", "RELEASED"):
             gross_revenue += amount
         elif txn_type in ("FEE", "COMMISSION", "SERVICE_FEE", "PLATFORM_FEE", "TRANSACTION_FEE"):
@@ -838,15 +859,12 @@ def input_tiktok_financial(tiktok_data, yesterday: datetime):
     print("✅ Financial Summary (TikTok) done!" if result.get("code") == 0 else "❌ Gagal")
 
 def input_tiktok_alerts(tiktok_data, yesterday: datetime):
-    """Cek kondisi abnormal TikTok → push ke Alert Log."""
     print("🚨 Cek Alert Log (TikTok Shop)...")
-
     yesterday_ms = int(yesterday.timestamp() * 1000)
     orders        = tiktok_data.get("orders", [])
     order_details = tiktok_data.get("order_details", [])
     alerts        = []
 
-    # Alert: tidak ada order sama sekali
     if len(orders) == 0:
         alerts.append({
             "Tanggal": yesterday_ms, "Platform": "Tiktok",
@@ -856,7 +874,6 @@ def input_tiktok_alerts(tiktok_data, yesterday: datetime):
             "Prioritas": "🟡 Penting", "Status": "Baru",
         })
 
-    # Alert: order dibatalkan > 20%
     if order_details:
         cancelled = sum(1 for o in order_details if isinstance(o, dict) and o.get("order_status") == "CANCELLED")
         cancel_rate = cancelled / len(order_details) * 100
@@ -870,7 +887,6 @@ def input_tiktok_alerts(tiktok_data, yesterday: datetime):
                 "Prioritas": "🔴 Kritis", "Status": "Baru",
             })
 
-    # Alert: tidak ada data finance
     if not tiktok_data.get("finance"):
         alerts.append({
             "Tanggal": yesterday_ms, "Platform": "Tiktok",
@@ -897,7 +913,6 @@ def main():
 
     if not LARK_APP_ID or not LARK_APP_SECRET:
         raise Exception("❌ LARK_APP_ID atau LARK_APP_SECRET tidak ada!")
-    # Generate tenant token sekali di awal — akan di-cache untuk seluruh run
     get_lark_tenant_token()
 
     # --------------------------------------------------------
@@ -922,7 +937,6 @@ def main():
     print("🎵 TIKTOK SHOP")
     print("─" * 40)
 
-    # Cek credentials tersedia sebelum fetch
     if not TIKTOK_APP_KEY or not TIKTOK_ACCESS_TOKEN or not TIKTOK_SHOP_ID:
         print("⚠️ TikTok credentials belum lengkap, skip TikTok Shop.")
     else:
@@ -934,7 +948,6 @@ def main():
         input_tiktok_financial(tiktok_data, yesterday)
         input_tiktok_alerts(tiktok_data, yesterday)
 
-    # --------------------------------------------------------
     print("\n" + "=" * 60)
     print("✅ SELESAI! Semua data sudah masuk ke Lark Base.")
     print("=" * 60)
