@@ -10,10 +10,9 @@ from datetime import datetime, timedelta
 # ============================================================
 
 SHOPEE_PARTNER_ID   = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
-SHOPEE_PARTNER_KEY  = os.environ.get("SHOPEE_PARTNER_KEY", "")
+SHOPEE_PARTNER_KEY  = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
 SHOPEE_SHOP_ID      = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
-SHOPEE_ACCESS_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "")
-# SHOPEE_BASE_URL   = "https://openplatform.sandbox.test-stable.shopee.sg"  # Sandbox
+SHOPEE_ACCESS_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
 SHOPEE_BASE_URL     = "https://partner.shopeemobile.com"  # Production
 
 # ============================================================
@@ -180,19 +179,27 @@ def lark_add_batch(table_id, records_list):
 # ============================================================
 
 def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
-    """HMAC-SHA256: app_secret + path + sorted_params + app_secret"""
-    excluded = {"sign"}
-    sorted_str = "".join(
+    """
+    HMAC-SHA256 untuk TikTok Shop API v202309.
+    Format: app_secret + path + params_string + app_secret
+    TIDAK perlu sort params — pakai urutan asli.
+    Exclude: sign, access_token
+    """
+    excluded = {"sign", "access_token"}
+    # TIDAK sort — pakai urutan asli params
+    params_str = "".join(
         f"{k}{v}"
-        for k, v in sorted(params.items())
+        for k, v in params.items()
         if k not in excluded
     )
-    base = TIKTOK_APP_SECRET + path + sorted_str + TIKTOK_APP_SECRET
-    return hmac.new(
+    base = TIKTOK_APP_SECRET + path + params_str + TIKTOK_APP_SECRET
+    sign = hmac.new(
         TIKTOK_APP_SECRET.encode("utf-8"),
         base.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
+    print(f"🔐 sign params: {[k for k in params if k not in excluded]} base_len={len(base)}")
+    return sign
 
 TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "").strip()
 
@@ -499,7 +506,7 @@ def input_daily_overview(d):
 def input_product_performance(items):
     print("⭐ Input Product Performance (Shopee)...")
     if not items:
-        print("⚠️ Tidak ada produk, skip.")
+        print("⚠️ Tidak ada produk di sandbox, skip.")
         return
 
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
