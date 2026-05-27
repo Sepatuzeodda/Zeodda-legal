@@ -180,12 +180,8 @@ def lark_add_batch(table_id, records_list):
 # ============================================================
 
 def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
-    """
-    HMAC-SHA256 untuk TikTok Shop API v202309.
-    Format: app_secret + path + sorted_param_string + app_secret
-    Body TIDAK ikut di-sign untuk v202309.
-    """
-    excluded = {"sign", "access_token"}
+    """HMAC-SHA256: app_secret + path + sorted_params + app_secret"""
+    excluded = {"sign"}
     sorted_str = "".join(
         f"{k}{v}"
         for k, v in sorted(params.items())
@@ -255,11 +251,12 @@ def tiktok_fetch_shop_cipher() -> str:
     return ""
 
 def tiktok_base_params() -> dict:
-    """Parameter wajib untuk TikTok Shop API."""
+    """Parameter wajib untuk TikTok Shop API v202309.
+    access_token TIDAK di query params — hanya di header x-tts-access-token.
+    """
     params = {
-        "app_key":      TIKTOK_APP_KEY,
-        "access_token": TIKTOK_ACCESS_TOKEN,
-        "timestamp":    str(int(time.time())),
+        "app_key":   TIKTOK_APP_KEY,
+        "timestamp": str(int(time.time())),
     }
     if TIKTOK_SHOP_CIPHER:
         params["shop_cipher"] = TIKTOK_SHOP_CIPHER
