@@ -32,9 +32,37 @@ TIKTOK_TOKEN_URL     = "https://auth.tiktok-shops.com/api/v2/token/get"
 # CONFIG - LARK
 # ============================================================
 
-LARK_USER_TOKEN = os.environ.get("LARK_USER_TOKEN", "")
+LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
+LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
 LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
 LARK_BASE_URL   = "https://open.larksuite.com"
+
+# Cache tenant token dalam satu run (valid 2 jam, lebih dari cukup)
+_lark_tenant_token = None
+
+def get_lark_tenant_token() -> str:
+    """
+    Generate tenant access token dari App ID + App Secret.
+    Token ini tidak pernah expired selama script jalan — di-refresh otomatis tiap run.
+    Tidak perlu copy-paste token manual ke GitHub Secrets.
+    """
+    global _lark_tenant_token
+    if _lark_tenant_token:
+        return _lark_tenant_token
+    url = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
+    try:
+        r = requests.post(url, json={
+            "app_id":     LARK_APP_ID,
+            "app_secret": LARK_APP_SECRET,
+        }, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            raise Exception(f"Gagal get tenant token: {data.get('msg')} (code={data.get('code')})")
+        _lark_tenant_token = data["tenant_access_token"]
+        print(f"✅ Lark tenant token berhasil di-generate")
+        return _lark_tenant_token
+    except Exception as e:
+        raise Exception(f"❌ get_lark_tenant_token error: {e}")
 
 TABLE_DAILY_OVERVIEW = "tblOIk5Rv5wTrbOM"
 TABLE_PRODUCT_PERF   = "tbl1TS2Hk26v5HB1"
