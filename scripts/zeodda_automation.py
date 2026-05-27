@@ -13,8 +13,8 @@ SHOPEE_BASE_URL     = "https://openplatform.sandbox.test-stable.shopee.sg"
 # Ganti ke ini saat Production approved:
 # SHOPEE_BASE_URL = "https://partner.shopeemobile.com"
 
-LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
-LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
+# LARK - Pakai user_access_token langsung (lebih simpel, akses langsung ke Base)
+LARK_USER_TOKEN = os.environ.get("LARK_USER_TOKEN", "")
 LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
 LARK_BASE_URL   = "https://open.larksuite.com"
 
@@ -28,7 +28,7 @@ TABLE_FINANCIAL      = "tbl2Or8DO3wywwxn"
 TABLE_ALERT_LOG      = "tblCutzEM4Bp0DmN"
 
 # ============================================================
-# SAFE TYPE HELPERS - Handle semua tipe data dari API
+# SAFE TYPE HELPERS
 # ============================================================
 
 def safe_float(val):
@@ -81,39 +81,44 @@ def shopee_get(path, extra={}):
         return {}
 
 # ============================================================
-# LARK HELPERS
+# LARK HELPERS - Pakai user_access_token
 # ============================================================
 
-def get_lark_token():
-    url = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
-    r = requests.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
-    data = r.json()
-    if data.get("code") == 0:
-        return data["tenant_access_token"]
-    print(f"❌ Lark token error: {data}")
-    return None
+def get_lark_headers():
+    """Return headers dengan user_access_token"""
+    if not LARK_USER_TOKEN:
+        raise Exception("LARK_USER_TOKEN tidak ditemukan di environment!")
+    return {
+        "Authorization": f"Bearer {LARK_USER_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
-def lark_add(token, table_id, fields):
+def lark_add(table_id, fields):
     url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records"
-    r = requests.post(url,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"fields": fields}, timeout=30)
-    result = r.json()
-    if result.get("code") != 0:
-        print(f"❌ Lark error {result.get('code')}: {result.get('msg')}")
-    return result
+    try:
+        r = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
+        result = r.json()
+        if result.get("code") != 0:
+            print(f"❌ Lark error {result.get('code')}: {result.get('msg')}")
+        return result
+    except Exception as e:
+        print(f"❌ Lark request error: {e}")
+        return {"code": -1}
 
-def lark_add_batch(token, table_id, records_list):
+def lark_add_batch(table_id, records_list):
     if not records_list:
         return {"code": 0}
     url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/batch_create"
-    r = requests.post(url,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"records": [{"fields": f} for f in records_list]}, timeout=30)
-    result = r.json()
-    if result.get("code") != 0:
-        print(f"❌ Lark batch error {result.get('code')}: {result.get('msg')}")
-    return result
+    try:
+        r = requests.post(url, headers=get_lark_headers(),
+            json={"records": [{"fields": f} for f in records_list]}, timeout=30)
+        result = r.json()
+        if result.get("code") != 0:
+            print(f"❌ Lark batch error {result.get('code')}: {result.get('msg')}")
+        return result
+    except Exception as e:
+        print(f"❌ Lark batch request error: {e}")
+        return {"code": -1}
 
 # ============================================================
 # AMBIL DATA SHOPEE
@@ -157,7 +162,7 @@ def fetch_all_shopee_data():
         "page_size": 50,
         "item_status": "NORMAL",
     })
-    data["items"]       = items_resp.get("item", []) if isinstance(items_resp, dict) else []
+    data["items"] = items_resp.get("item", []) if isinstance(items_resp, dict) else []
 
     print("✅ Data Shopee berhasil diambil!")
     return data
@@ -166,7 +171,7 @@ def fetch_all_shopee_data():
 # INPUT KE LARK BASE
 # ============================================================
 
-def input_daily_overview(token, d):
+def input_daily_overview(d):
     print("📋 Input Daily Overview...")
     perf_map = {1: "Poor", 2: "Improvement Needed", 3: "Good", 4: "Excellent"}
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
@@ -188,10 +193,10 @@ def input_daily_overview(token, d):
         "Produk Bermasalah": safe_int(d["issues"].get("total_count", 0)),
         "Saldo Iklan": safe_float(d["balance"].get("total_balance", 0)),
     }
-    result = lark_add(token, TABLE_DAILY_OVERVIEW, fields)
+    result = lark_add(TABLE_DAILY_OVERVIEW, fields)
     print("✅ Daily Overview done!" if result.get("code") == 0 else "❌ Gagal")
 
-def input_product_performance(token, items):
+def input_product_performance(items):
     print("⭐ Input Product Performance...")
     if not items:
         print("⚠️ Tidak ada produk di sandbox, skip.")
@@ -238,10 +243,10 @@ def input_product_performance(token, items):
         })
 
     if records:
-        result = lark_add_batch(token, TABLE_PRODUCT_PERF, records)
+        result = lark_add_batch(TABLE_PRODUCT_PERF, records)
         print(f"✅ Product Performance done {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
 
-def input_ads_shop(token, d):
+def input_ads_shop(d):
     print("📢 Input Ads Shop Level...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
     ads = d.get("ads") or {}
@@ -258,10 +263,10 @@ def input_ads_shop(token, d):
         "Total Order dari Iklan": safe_int(ads.get("order", 0)),
         "Revenue dari Iklan": safe_float(ads.get("order_amount", 0)),
     }
-    result = lark_add(token, TABLE_ADS_SHOP, fields)
+    result = lark_add(TABLE_ADS_SHOP, fields)
     print("✅ Ads Shop Level done!" if result.get("code") == 0 else "❌ Gagal")
 
-def input_financial(token, d):
+def input_financial(d):
     print("💰 Input Financial Summary...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
     ads = d.get("ads") or {}
@@ -275,10 +280,10 @@ def input_financial(token, d):
         "Biaya Platform": safe_float(d["income"].get("escrow_amount", 0)),
         "Spend Iklan": safe_float(ads.get("cost", 0)),
     }
-    result = lark_add(token, TABLE_FINANCIAL, fields)
+    result = lark_add(TABLE_FINANCIAL, fields)
     print("✅ Financial Summary done!" if result.get("code") == 0 else "❌ Gagal")
 
-def input_alerts(token, d):
+def input_alerts(d):
     print("🚨 Cek dan input Alert Log...")
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
     alerts = []
@@ -336,7 +341,7 @@ def input_alerts(token, d):
         })
 
     if alerts:
-        result = lark_add_batch(token, TABLE_ALERT_LOG, alerts)
+        result = lark_add_batch(TABLE_ALERT_LOG, alerts)
         print(f"✅ {len(alerts)} alert dibuat!" if result.get("code") == 0 else "❌ Gagal")
     else:
         print("✅ Tidak ada alert hari ini!")
@@ -350,18 +355,20 @@ def main():
     print(f"🚀 ZEODDA AUTOMATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    lark_token = get_lark_token()
-    if not lark_token:
-        raise Exception("Gagal dapat Lark token!")
+    # Validasi token tersedia
+    if not LARK_USER_TOKEN:
+        raise Exception("❌ LARK_USER_TOKEN tidak ada! Tambahkan ke GitHub Secrets.")
+
+    print(f"✅ Lark user token tersedia")
 
     data = fetch_all_shopee_data()
 
     print("\n📤 MENGINPUT KE LARK BASE...")
-    input_daily_overview(lark_token, data)
-    input_product_performance(lark_token, data["items"])
-    input_ads_shop(lark_token, data)
-    input_financial(lark_token, data)
-    input_alerts(lark_token, data)
+    input_daily_overview(data)
+    input_product_performance(data["items"])
+    input_ads_shop(data)
+    input_financial(data)
+    input_alerts(data)
 
     print("\n" + "=" * 60)
     print("✅ SELESAI! Semua data sudah masuk ke Lark Base.")
