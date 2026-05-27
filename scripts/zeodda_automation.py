@@ -185,9 +185,14 @@ def fetch_all_shopee_data():
     d["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
 
     # === ADS ===
+    # Format tanggal untuk Ads API: DD-MM-YYYY (beda dengan Payment yang YYYY-MM-DD)
+    date_str_dmy = yesterday_wib.strftime("%d-%m-%Y")
+
+    d["date_str_dmy"] = date_str_dmy
+
     d["balance"] = shopee_get("/api/v2/ads/get_total_balance")
     d["ads"]     = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
-        "start_date": date_str, "end_date": date_str,
+        "start_date": date_str_dmy, "end_date": date_str_dmy,
     })
     d["toggle"]  = shopee_get("/api/v2/ads/get_shop_toggle_info")
 
@@ -212,14 +217,16 @@ def fetch_all_shopee_data():
     d["income"]  = shopee_get("/api/v2/payment/get_income_overview", {
         "start_date": date_str, "end_date": date_str,
     })
-    d["payout"]  = shopee_get("/api/v2/payment/get_payout_info")
+    d["payout"]  = shopee_get("/api/v2/payment/get_payout_info", {
+        "page_size": 20, "page_no": 1,
+    })
     d["escrow"]  = shopee_get("/api/v2/payment/get_escrow_list", {
         "release_time_from": ts_start, "release_time_to": ts_end,
         "page_no": 1, "page_size": 100,
     })
     d["billing"] = shopee_get("/api/v2/payment/get_billing_transaction_info", {
         "create_time_from": ts_start, "create_time_to": ts_end,
-        "page_no": 1, "page_size": 100,
+        "page_size": 100, "cursor": "",
     })
 
     # === PRODUK — ambil semua item aktif ===
@@ -316,12 +323,19 @@ def fetch_product_details(d):
             if isinstance(item, dict):
                 extra_map[str(item.get("item_id", ""))] = item
 
-    # --- Promotion (per item, satu per satu karena API tidak batch) ---
+    # --- Promotion: pakai get_discount_list (bukan get_item_promotion yg butuh mpsku) ---
     promo_set = set()
-    for iid in item_ids[:20]:  # limit 20 untuk hemat waktu
-        resp = shopee_get("/api/v2/product/get_item_promotion", {"item_id": int(iid)})
-        if isinstance(resp, dict) and resp.get("promotion_list"):
-            promo_set.add(iid)
+    promo_resp = shopee_get("/api/v2/discount/get_discount_list", {
+        "discount_status": "ongoing",
+        "page_no": 1, "page_size": 100,
+    })
+    for disc in (promo_resp.get("discount_list", []) or []):
+        if not isinstance(disc, dict):
+            continue
+        for it in (disc.get("item_list", []) or []):
+            if isinstance(it, dict):
+                promo_set.add(str(it.get("item_id", "")))
+    print(f"  Produk promo aktif: {len(promo_set)}")
 
     # --- Comment/Review per produk ---
     comment_map = {}
@@ -342,20 +356,17 @@ def fetch_product_details(d):
         avg      = sum(k * v for k, v in star.items()) // total if total else 0
         comment_map[iid] = {"star": star, "total": total, "avg": avg}
 
-    # --- AMS: performa organik per produk ---
+    # --- AMS: SKIP — butuh permission tambahan di Shopee Console ---
+    # Aktifkan setelah centang AMS permission di App Management
     ams_map = {}
-    for iid in item_ids[:20]:
-        resp = shopee_get("/api/v2/ams/get_product_performance", {
-            "item_id":    int(iid),
-            "start_date": date_str,
-            "end_date":   date_str,
-        })
-        if isinstance(resp, dict):
-            ams_map[iid] = resp
+    # for iid in item_ids[:20]:
+    #     resp = shopee_get("/api/v2/ams/get_product_performance", {...})
+    #     if isinstance(resp, dict): ams_map[iid] = resp
 
     # --- Ads Product Level: campaign per produk ---
+    date_str_dmy = d.get("date_str_dmy", date_str)  # DD-MM-YYYY untuk Ads API
     camp_resp = shopee_get("/api/v2/ads/get_product_level_campaign_id_list", {
-        "start_date": date_str, "end_date": date_str,
+        "start_date": date_str_dmy, "end_date": date_str_dmy,
     })
     camp_ids = []
     if isinstance(camp_resp, dict):
@@ -368,7 +379,7 @@ def fetch_product_details(d):
             batch = camp_ids[i:i+50]
             # Performa harian
             perf_resp = shopee_get("/api/v2/ads/get_product_campaign_daily_performance", {
-                "start_date": date_str, "end_date": date_str,
+                "start_date": date_str_dmy, "end_date": date_str_dmy,
                 "campaign_id_list": ",".join(str(c) for c in batch),
             })
             for cp in (perf_resp.get("campaign_performance_list", []) or []):
