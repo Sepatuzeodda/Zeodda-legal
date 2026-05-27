@@ -46,6 +46,8 @@ def get_lark_tenant_token() -> str:
 TABLE_DAILY_OVERVIEW = "tblSVQG08nHr7tXD"
 TABLE_PRODUCT_PERF   = "tblRlDzWXK5gQXzT"
 TABLE_ADS_SHOP       = "tbl6EhWSzZumBR4L"
+TABLE_ADS_PRODUCT    = "tbl3r112gUTEhHCe"
+TABLE_KOMPARASI      = "tblZoIIwUj0RN93p"
 TABLE_FINANCIAL      = "tblLh7liZZxPzEpl"
 TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 
@@ -502,6 +504,133 @@ def input_alerts(d):
         print("✅ Tidak ada alert hari ini!")
 
 # ============================================================
+# ADS PRODUCT LEVEL
+# ============================================================
+
+def input_ads_product_level(d):
+    print("🎯 Input Ads Product Level (Shopee)...")
+
+    date_str     = d["date_str"]
+    yesterday_ms = d["yesterday_ms"]
+
+    # Step 1: ambil list campaign ID per produk
+    campaign_list_resp = shopee_get("/api/v2/ads/get_product_level_campaign_id_list", {
+        "start_date": date_str, "end_date": date_str,
+    })
+    campaign_ids = []
+    if isinstance(campaign_list_resp, dict):
+        campaign_ids = campaign_list_resp.get("campaign_id_list", []) or []
+
+    if not campaign_ids:
+        print("⚠️ Tidak ada campaign produk kemarin, skip Ads Product Level.")
+        return
+
+    print(f"  → {len(campaign_ids)} campaign ID ditemukan")
+
+    # Step 2: ambil performa per campaign
+    records = []
+    for i in range(0, len(campaign_ids), 50):
+        batch = campaign_ids[i:i+50]
+        perf_resp = shopee_get("/api/v2/ads/get_product_campaign_daily_performance", {
+            "start_date": date_str,
+            "end_date":   date_str,
+            "campaign_id_list": ",".join(str(c) for c in batch),
+        })
+        perf_list = perf_resp.get("campaign_performance_list", []) if isinstance(perf_resp, dict) else []
+
+        for camp in (perf_list or []):
+            if not isinstance(camp, dict):
+                continue
+            records.append({
+                "Tanggal":              yesterday_ms,
+                "Platform":             "Shopee Ads",
+                "Nama Produk":          safe_str(camp.get("campaign_name", "")),
+                "Campaign ID":          safe_str(camp.get("campaign_id", "")),
+                "Spend":                safe_int(camp.get("cost", 0)),
+                "Impresi":              safe_int(camp.get("impression", 0)),
+                "Klik":                 safe_int(camp.get("click", 0)),
+                "Order dari Iklan":     safe_int(camp.get("order", 0)),
+                "Revenue dari Iklan":   safe_int(camp.get("order_amount", 0)),
+                "Status Campaign":      safe_str(camp.get("campaign_status", "")),
+                "Rekomendasi Bid":      0,
+            })
+
+    if records:
+        result = lark_add_batch(TABLE_ADS_PRODUCT, records)
+        print(f"✅ Ads Product Level {len(records)} campaign!" if result.get("code") == 0 else "❌ Gagal")
+    else:
+        print("⚠️ Tidak ada data performa campaign.")
+
+
+# ============================================================
+# KOMPARASI PRODUK
+# ============================================================
+
+def input_komparasi_produk(d):
+    print("📊 Input Komparasi Produk (Shopee)...")
+
+    date_str     = d["date_str"]
+    yesterday_ms = d["yesterday_ms"]
+    items        = d.get("items", [])
+
+    if not items:
+        print("⚠️ Tidak ada produk, skip Komparasi.")
+        return
+
+    records = []
+    for item in items[:20]:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("item_id")
+
+        # Fetch detail produk untuk nama & rating
+        item_detail    = shopee_get("/api/v2/product/get_item_base_info", {
+            "item_id_list": str(item_id),
+        })
+        item_info_list = item_detail.get("item_list", []) if isinstance(item_detail, dict) else []
+        item_info      = item_info_list[0] if item_info_list else {}
+        nama_produk    = safe_str(item_info.get("item_name", item.get("item_name", "")))
+
+        # Fetch performa organik per produk
+        perf_resp = shopee_get("/api/v2/product/get_product_performance", {
+            "item_id":    item_id,
+            "start_date": date_str,
+            "end_date":   date_str,
+        })
+        terjual_organik  = safe_int(perf_resp.get("sold_count", 0)) if isinstance(perf_resp, dict) else 0
+        revenue_organik  = safe_int(perf_resp.get("order_amount", 0)) if isinstance(perf_resp, dict) else 0
+        views            = safe_int(perf_resp.get("page_view", 0)) if isinstance(perf_resp, dict) else 0
+
+        # Rating dari comment
+        comment_resp = shopee_get("/api/v2/product/get_comment", {
+            "item_id": item_id, "cursor": "", "page_size": 10,
+        })
+        comments = comment_resp.get("comment_list", []) if isinstance(comment_resp, dict) else []
+        if not isinstance(comments, list):
+            comments = []
+        star_sum   = sum(safe_int(c.get("rating_star", 0)) for c in comments if isinstance(c, dict))
+        avg_rating = star_sum // len(comments) if comments else 0
+
+        records.append({
+            "Tanggal":           yesterday_ms,
+            "Nama Produk":       nama_produk,
+            "Platform":          "Shopee",
+            "Rating Bintang":    safe_int(avg_rating),
+            "Terjual Organik":   terjual_organik,
+            "Revenue Organik":   revenue_organik,
+            "Terjual dari Iklan":0,   # akan diisi dari Ads Product Level nanti
+            "Revenue dari Iklan":0,
+            "Spend Iklan":       0,
+            "Status Boost":      "",
+            "Rekomendasi":       "",
+        })
+
+    if records:
+        result = lark_add_batch(TABLE_KOMPARASI, records)
+        print(f"✅ Komparasi Produk {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -523,6 +652,8 @@ def main():
     input_daily_overview(shopee_data)
     input_product_performance(shopee_data)
     input_ads_shop(shopee_data)
+    input_ads_product_level(shopee_data)
+    input_komparasi_produk(shopee_data)
     input_financial(shopee_data)
     input_alerts(shopee_data)
 
