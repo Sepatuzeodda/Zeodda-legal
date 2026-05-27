@@ -201,11 +201,11 @@ def tiktok_sign(path: str, params: dict, body: dict = None) -> str:
 TIKTOK_SHOP_CIPHER = os.environ.get("TIKTOK_SHOP_CIPHER", "").strip()
 
 def tiktok_fetch_shop_cipher() -> str:
-    """Fetch shop_cipher dari authorized shops jika belum ada."""
+    """Fetch shop_cipher dari shop info endpoint."""
     global TIKTOK_SHOP_CIPHER
     if TIKTOK_SHOP_CIPHER:
         return TIKTOK_SHOP_CIPHER
-    path = "/authorization/202309/shops"
+    path = "/shop/202309/shops"
     params = {
         "app_key":   TIKTOK_APP_KEY,
         "timestamp": str(int(time.time())),
@@ -225,12 +225,30 @@ def tiktok_fetch_shop_cipher() -> str:
     try:
         r = requests.get(f"{TIKTOK_BASE_URL}{path}", params=params, headers=headers, timeout=30)
         data = r.json()
-        print(f"🔍 fetch_shop_cipher: code={data.get('code')} msg={data.get('message','')[:80]}")
+        print(f"🔍 fetch_shop_cipher [shop/202309/shops]: code={data.get('code')} msg={data.get('message','')[:80]}")
         if data.get("code") == 0:
             shops = data.get("data", {}).get("shops", [])
             if shops:
                 TIKTOK_SHOP_CIPHER = shops[0].get("cipher", "")
-                print(f"✅ shop_cipher ditemukan: {TIKTOK_SHOP_CIPHER[:15]}...")
+                print(f"✅ shop_cipher: {TIKTOK_SHOP_CIPHER[:15]}...")
+                return TIKTOK_SHOP_CIPHER
+        # Coba endpoint alternatif
+        path2 = "/seller/202309/shops"
+        params2 = {
+            "app_key":   TIKTOK_APP_KEY,
+            "timestamp": str(int(time.time())),
+        }
+        sorted_str2 = "".join(f"{k}{v}" for k, v in sorted(params2.items()) if k not in excluded)
+        base2 = TIKTOK_APP_SECRET + path2 + sorted_str2 + TIKTOK_APP_SECRET
+        params2["sign"] = hmac.new(TIKTOK_APP_SECRET.encode("utf-8"), base2.encode("utf-8"), hashlib.sha256).hexdigest()
+        r2 = requests.get(f"{TIKTOK_BASE_URL}{path2}", params=params2, headers=headers, timeout=30)
+        data2 = r2.json()
+        print(f"🔍 fetch_shop_cipher [seller/202309/shops]: code={data2.get('code')} msg={data2.get('message','')[:80]}")
+        if data2.get("code") == 0:
+            shops2 = data2.get("data", {}).get("shops", [])
+            if shops2:
+                TIKTOK_SHOP_CIPHER = shops2[0].get("cipher", "")
+                print(f"✅ shop_cipher: {TIKTOK_SHOP_CIPHER[:15]}...")
                 return TIKTOK_SHOP_CIPHER
     except Exception as e:
         print(f"❌ fetch_shop_cipher error: {e}")
