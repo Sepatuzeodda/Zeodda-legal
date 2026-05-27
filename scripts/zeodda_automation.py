@@ -215,25 +215,39 @@ def fetch_all_shopee_data():
     all_orders    = safe_list(data.get("orders", {}), "order_list")
     order_sn_list = [o.get("order_sn") for o in all_orders if o.get("order_sn")]
 
-    omzet_harian = 0
+    omzet_harian = 0  # exclude ongkir (total_amount)
+    omzet_gross  = 0  # include ongkir (buyer_paid_amount = sama dengan Seller Center)
+
     if order_sn_list:
         print(f"  → Fetching detail {len(order_sn_list)} order kemarin untuk omzet...")
         for i in range(0, len(order_sn_list), 50):
             batch = order_sn_list[i:i+50]
             detail_resp = shopee_get("/api/v2/order/get_order_detail", {
                 "order_sn_list": ",".join(batch),
-                "response_optional_fields": "total_amount,item_list",
+                "response_optional_fields": "total_amount,buyer_paid_amount,actual_shipping_fee,item_list",
             })
             for od in (detail_resp.get("order_list", []) or []):
                 if not isinstance(od, dict):
                     continue
-                if od.get("order_status") not in ("CANCELLED", "UNPAID"):
-                    omzet_harian += safe_int(od.get("total_amount", 0))
+                if od.get("order_status") in ("CANCELLED", "UNPAID"):
+                    continue
+                omzet_harian += safe_int(od.get("total_amount", 0))
+                # buyer_paid_amount = total_amount + ongkir yang dibayar buyer
+                # Jika tidak ada, fallback ke total_amount + actual_shipping_fee
+                buyer_paid = od.get("buyer_paid_amount", 0)
+                if buyer_paid:
+                    omzet_gross += safe_int(buyer_paid)
+                else:
+                    shipping = safe_int(od.get("actual_shipping_fee", 0))
+                    omzet_gross += safe_int(od.get("total_amount", 0)) + shipping
 
     data["omzet_harian"] = omzet_harian
+    data["omzet_gross"]  = omzet_gross
 
     print(f"🔍 RAW balance (closing kemarin): {repr(data['balance'])[:100]}")
-    print(f"💰 Omzet Kemarin: Rp {omzet_harian:,} dari {len(order_sn_list)} order")
+    print(f"💰 Omzet Kemarin (exclude ongkir): Rp {omzet_harian:,}")
+    print(f"💰 Omzet Gross   (include ongkir): Rp {omzet_gross:,} ← harusnya sama dengan Seller Center")
+    print(f"   dari {len(order_sn_list)} order")
     print("✅ Data Shopee berhasil diambil!")
     return data
 
@@ -262,7 +276,8 @@ def input_daily_overview(d):
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
         "Total Retur":            safe_int(len(returns_list)),
-        "Omzet Harian":           safe_int(d.get("omzet_harian", 0)),
+        "Omzet Harian":           safe_int(d.get("omzet_harian", 0)),   # exclude ongkir
+        "Omzet Gross":            safe_int(d.get("omzet_gross", 0)),     # include ongkir (= Seller Center)
         "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
