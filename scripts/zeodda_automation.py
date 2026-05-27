@@ -140,6 +140,14 @@ def fetch_all_shopee_data():
         "time_to": now,
         "page_size": 100,
     })
+    # FIX: Hitung order dibatalkan secara terpisah (status CANCELLED)
+    data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time",
+        "time_from": today,
+        "time_to": now,
+        "page_size": 100,
+        "order_status": "CANCELLED",
+    })
     data["returns"]     = shopee_get("/api/v2/returns/get_return_list", {
         "page_no": 1,
         "page_size": 100,
@@ -181,10 +189,15 @@ def input_daily_overview(d):
     if not isinstance(overall_perf, dict):
         overall_perf = {}
 
+    # Hitung order masuk (semua status) dan dibatalkan
+    all_orders = d["orders"].get("order_list", [])
+    cancelled_orders = d["cancelled_orders"].get("order_list", [])
+
     fields = {
         "Tanggal": today_ms,
         "Platform": "Shopee",
-        "Total Order Masuk": safe_int(len(d["orders"].get("order_list", []))),
+        "Total Order Masuk": safe_int(len(all_orders)),
+        "Total Order Dibatalkan": safe_int(len(cancelled_orders)),  # FIX: field ini sebelumnya hilang
         "Total Retur": safe_int(len(d["returns"].get("return_list", []))),
         "Omzet Harian": safe_float(d["income"].get("total_income", 0)),
         "Follower Toko": safe_int(d["shop_info"].get("follower_count", 0)),
@@ -234,13 +247,13 @@ def input_product_performance(items):
             "Nama Produk": safe_str(item.get("item_name", "")),
             "Item ID": safe_str(item_id),
             "Rating Bintang": round(avg, 2),
-            "Total Review": len(comments),
-            "Review Bintang 5": star[5],
-            "Review Bintang 4": star[4],
-            "Review Bintang 3": star[3],
-            "Review Bintang 2": star[2],
-            "Review Bintang 1": star[1],
-            "Review Negatif Baru": star[1] + star[2],
+            "Total Review": safe_int(len(comments)),
+            "Review Bintang 5": safe_int(star[5]),
+            "Review Bintang 4": safe_int(star[4]),
+            "Review Bintang 3": safe_int(star[3]),
+            "Review Bintang 2": safe_int(star[2]),
+            "Review Bintang 1": safe_int(star[1]),
+            "Review Negatif Baru": safe_int(star[1] + star[2]),
         })
 
     if records:
@@ -256,7 +269,7 @@ def input_ads_shop(d):
 
     fields = {
         "Tanggal": today_ms,
-        "Platform": "Shopee Ads",
+        "Platform": "Shopee",  # FIX: was "Shopee Ads" → tidak ada di Single Option, harus "Shopee"
         "Saldo Iklan": safe_float(d["balance"].get("total_balance", 0)),
         "Total Spend": safe_float(ads.get("cost", 0)),
         "Total Impresi": safe_int(ads.get("impression", 0)),
@@ -296,7 +309,7 @@ def input_alerts(d):
             "Platform": "Shopee",
             "Tipe Alert": "Iklan Hampir Habis",
             "Detail": f"Saldo iklan Rp {saldo:,.0f} — segera top up!",
-            "Nilai Saat Ini": saldo,
+            "Nilai Saat Ini": float(saldo),   # sudah float ✅
             "Nilai Normal": 100000.0,
             "Prioritas": "🔴 Kritis",
             "Status": "Baru",
