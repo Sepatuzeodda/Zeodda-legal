@@ -13,7 +13,7 @@ SHOPEE_BASE_URL     = "https://openplatform.sandbox.test-stable.shopee.sg"
 # Ganti ke ini saat Production approved:
 # SHOPEE_BASE_URL = "https://partner.shopeemobile.com"
 
-# LARK - Pakai user_access_token langsung (lebih simpel, akses langsung ke Base)
+# LARK - Pakai user_access_token langsung
 LARK_USER_TOKEN = os.environ.get("LARK_USER_TOKEN", "")
 LARK_APP_TOKEN  = "Nql3bfZtqaNABdslc1jlYFRqgCc"
 LARK_BASE_URL   = "https://open.larksuite.com"
@@ -31,19 +31,12 @@ TABLE_ALERT_LOG      = "tblCutzEM4Bp0DmN"
 # SAFE TYPE HELPERS
 # ============================================================
 
-def safe_float(val):
-    if val is None or isinstance(val, (dict, list)):
-        return 0.0
-    try:
-        return float(val)
-    except:
-        return 0.0
-
 def safe_int(val):
+    """Semua field angka di Lark pakai Number format Thousands → harus int"""
     if val is None or isinstance(val, (dict, list)):
         return 0
     try:
-        return int(val)
+        return int(float(val))  # float() dulu agar "1500.0" bisa dikonversi
     except:
         return 0
 
@@ -81,11 +74,10 @@ def shopee_get(path, extra={}):
         return {}
 
 # ============================================================
-# LARK HELPERS - Pakai user_access_token
+# LARK HELPERS
 # ============================================================
 
 def get_lark_headers():
-    """Return headers dengan user_access_token"""
     if not LARK_USER_TOKEN:
         raise Exception("LARK_USER_TOKEN tidak ditemukan di environment!")
     return {
@@ -116,6 +108,7 @@ def lark_add_batch(table_id, records_list):
         result = r.json()
         if result.get("code") != 0:
             print(f"❌ Lark batch error {result.get('code')}: {result.get('msg')}")
+            print(f"🔍 Sample record: {records_list[0] if records_list else 'kosong'}")
         return result
     except Exception as e:
         print(f"❌ Lark batch request error: {e}")
@@ -132,15 +125,14 @@ def fetch_all_shopee_data():
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     data = {}
-    data["shop_info"]   = shopee_get("/api/v2/shop/get_shop_info")
-    data["shop_perf"]   = shopee_get("/api/v2/account_health/get_shop_performance")
-    data["orders"]      = shopee_get("/api/v2/order/get_order_list", {
+    data["shop_info"]        = shopee_get("/api/v2/shop/get_shop_info")
+    data["shop_perf"]        = shopee_get("/api/v2/account_health/get_shop_performance")
+    data["orders"]           = shopee_get("/api/v2/order/get_order_list", {
         "time_range_field": "create_time",
         "time_from": today,
         "time_to": now,
         "page_size": 100,
     })
-    # FIX: Hitung order dibatalkan secara terpisah (status CANCELLED)
     data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
         "time_range_field": "create_time",
         "time_from": today,
@@ -148,25 +140,25 @@ def fetch_all_shopee_data():
         "page_size": 100,
         "order_status": "CANCELLED",
     })
-    data["returns"]     = shopee_get("/api/v2/returns/get_return_list", {
+    data["returns"]          = shopee_get("/api/v2/returns/get_return_list", {
         "page_no": 1,
         "page_size": 100,
         "create_time_from": today,
         "create_time_to": now,
     })
-    data["income"]      = shopee_get("/api/v2/payment/get_income_overview", {
+    data["income"]           = shopee_get("/api/v2/payment/get_income_overview", {
         "start_date": date_str,
         "end_date": date_str,
     })
-    data["balance"]     = shopee_get("/api/v2/ads/get_total_balance")
-    data["penalty"]     = shopee_get("/api/v2/account_health/get_penalty_point_history")
-    data["late_orders"] = shopee_get("/api/v2/account_health/get_late_orders")
-    data["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
-    data["ads"]         = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
+    data["balance"]          = shopee_get("/api/v2/ads/get_total_balance")
+    data["penalty"]          = shopee_get("/api/v2/account_health/get_penalty_point_history")
+    data["late_orders"]      = shopee_get("/api/v2/account_health/get_late_orders")
+    data["issues"]           = shopee_get("/api/v2/account_health/get_listings_with_issues")
+    data["ads"]              = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
         "start_date": date_str,
         "end_date": date_str,
     })
-    items_resp          = shopee_get("/api/v2/product/get_item_list", {
+    items_resp               = shopee_get("/api/v2/product/get_item_list", {
         "offset": 0,
         "page_size": 50,
         "item_status": "NORMAL",
@@ -178,6 +170,7 @@ def fetch_all_shopee_data():
 
 # ============================================================
 # INPUT KE LARK BASE
+# Semua field angka = safe_int() karena tipe Number di Lark
 # ============================================================
 
 def input_daily_overview(d):
@@ -189,23 +182,22 @@ def input_daily_overview(d):
     if not isinstance(overall_perf, dict):
         overall_perf = {}
 
-    # Hitung order masuk (semua status) dan dibatalkan
-    all_orders = d["orders"].get("order_list", [])
+    all_orders       = d["orders"].get("order_list", [])
     cancelled_orders = d["cancelled_orders"].get("order_list", [])
 
     fields = {
-        "Tanggal": today_ms,
-        "Platform": "Shopee",
-        "Total Order Masuk": safe_int(len(all_orders)),
-        "Total Order Dibatalkan": safe_int(len(cancelled_orders)),  # FIX: field ini sebelumnya hilang
-        "Total Retur": safe_int(len(d["returns"].get("return_list", []))),
-        "Omzet Harian": safe_float(d["income"].get("total_income", 0)),
-        "Follower Toko": safe_int(d["shop_info"].get("follower_count", 0)),
-        "Skor Performa Toko": perf_map.get(safe_int(overall_perf.get("rating", 0)), "Unknown"),
-        "Poin Penalti": safe_int(d["penalty"].get("total_penalty_point", 0)),
-        "Order Terlambat": safe_int(d["late_orders"].get("total_count", 0)),
-        "Produk Bermasalah": safe_int(d["issues"].get("total_count", 0)),
-        "Saldo Iklan": safe_float(d["balance"].get("total_balance", 0)),
+        "Tanggal":                today_ms,
+        "Platform":               "Shopee",
+        "Total Order Masuk":      safe_int(len(all_orders)),
+        "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
+        "Total Retur":            safe_int(len(d["returns"].get("return_list", []))),
+        "Omzet Harian":           safe_int(d["income"].get("total_income", 0)),
+        "Follower Toko":          safe_int(d["shop_info"].get("follower_count", 0)),
+        "Skor Performa Toko":     perf_map.get(safe_int(overall_perf.get("rating", 0)), "Unknown"),
+        "Poin Penalti":           safe_int(d["penalty"].get("total_penalty_point", 0)),
+        "Order Terlambat":        safe_int(d["late_orders"].get("total_count", 0)),
+        "Produk Bermasalah":      safe_int(d["issues"].get("total_count", 0)),
+        "Saldo Iklan":            safe_int(d["balance"].get("total_balance", 0)),
     }
     result = lark_add(TABLE_DAILY_OVERVIEW, fields)
     print("✅ Daily Overview done!" if result.get("code") == 0 else "❌ Gagal")
@@ -239,20 +231,22 @@ def input_product_performance(items):
                 if r in star:
                     star[r] += 1
 
-        avg = sum(k * v for k, v in star.items()) / len(comments) if comments else 0.0
+        # Rating Bintang pakai Number biasa (desimal) → kirim sebagai int juga
+        # misal rata-rata 4.5 → simpan sebagai 45 (×10) ATAU bulatkan ke int
+        avg = sum(k * v for k, v in star.items()) // len(comments) if comments else 0
 
         records.append({
-            "Tanggal": today_ms,
-            "Platform": "Shopee",
-            "Nama Produk": safe_str(item.get("item_name", "")),
-            "Item ID": safe_str(item_id),
-            "Rating Bintang": round(avg, 2),
-            "Total Review": safe_int(len(comments)),
-            "Review Bintang 5": safe_int(star[5]),
-            "Review Bintang 4": safe_int(star[4]),
-            "Review Bintang 3": safe_int(star[3]),
-            "Review Bintang 2": safe_int(star[2]),
-            "Review Bintang 1": safe_int(star[1]),
+            "Tanggal":            today_ms,
+            "Platform":           "Shopee",
+            "Nama Produk":        safe_str(item.get("item_name", "")),
+            "Item ID":            safe_str(item_id),
+            "Rating Bintang":     safe_int(avg),
+            "Total Review":       safe_int(len(comments)),
+            "Review Bintang 5":   safe_int(star[5]),
+            "Review Bintang 4":   safe_int(star[4]),
+            "Review Bintang 3":   safe_int(star[3]),
+            "Review Bintang 2":   safe_int(star[2]),
+            "Review Bintang 1":   safe_int(star[1]),
             "Review Negatif Baru": safe_int(star[1] + star[2]),
         })
 
@@ -268,14 +262,14 @@ def input_ads_shop(d):
         ads = {}
 
     fields = {
-        "Tanggal": today_ms,
-        "Platform": "Shopee",  # FIX: was "Shopee Ads" → tidak ada di Single Option, harus "Shopee"
-        "Saldo Iklan": safe_float(d["balance"].get("total_balance", 0)),
-        "Total Spend": safe_float(ads.get("cost", 0)),
-        "Total Impresi": safe_int(ads.get("impression", 0)),
-        "Total Klik": safe_int(ads.get("click", 0)),
+        "Tanggal":                today_ms,
+        "Platform":               "Shopee",
+        "Saldo Iklan":            safe_int(d["balance"].get("total_balance", 0)),
+        "Total Spend":            safe_int(ads.get("cost", 0)),
+        "Total Impresi":          safe_int(ads.get("impression", 0)),
+        "Total Klik":             safe_int(ads.get("click", 0)),
         "Total Order dari Iklan": safe_int(ads.get("order", 0)),
-        "Revenue dari Iklan": safe_float(ads.get("order_amount", 0)),
+        "Revenue dari Iklan":     safe_int(ads.get("order_amount", 0)),
     }
     result = lark_add(TABLE_ADS_SHOP, fields)
     print("✅ Ads Shop Level done!" if result.get("code") == 0 else "❌ Gagal")
@@ -288,11 +282,11 @@ def input_financial(d):
         ads = {}
 
     fields = {
-        "Tanggal": today_ms,
-        "Platform": "Shopee",
-        "Gross Revenue": safe_float(d["income"].get("total_income", 0)),
-        "Biaya Platform": safe_float(d["income"].get("escrow_amount", 0)),
-        "Spend Iklan": safe_float(ads.get("cost", 0)),
+        "Tanggal":       today_ms,
+        "Platform":      "Shopee",
+        "Gross Revenue": safe_int(d["income"].get("total_income", 0)),
+        "Biaya Platform": safe_int(d["income"].get("escrow_amount", 0)),
+        "Spend Iklan":   safe_int(ads.get("cost", 0)),
     }
     result = lark_add(TABLE_FINANCIAL, fields)
     print("✅ Financial Summary done!" if result.get("code") == 0 else "❌ Gagal")
@@ -302,56 +296,56 @@ def input_alerts(d):
     today_ms = int(datetime.now().replace(hour=0, minute=0, second=0).timestamp() * 1000)
     alerts = []
 
-    saldo = safe_float(d["balance"].get("total_balance", 0))
+    saldo = safe_int(d["balance"].get("total_balance", 0))
     if saldo < 100000:
         alerts.append({
-            "Tanggal": today_ms,
-            "Platform": "Shopee",
-            "Tipe Alert": "Iklan Hampir Habis",
-            "Detail": f"Saldo iklan Rp {saldo:,.0f} — segera top up!",
-            "Nilai Saat Ini": float(saldo),   # sudah float ✅
-            "Nilai Normal": 100000.0,
-            "Prioritas": "🔴 Kritis",
-            "Status": "Baru",
+            "Tanggal":        today_ms,
+            "Platform":       "Shopee",
+            "Tipe Alert":     "Iklan Hampir Habis",
+            "Detail":         f"Saldo iklan Rp {saldo:,} — segera top up!",
+            "Nilai Saat Ini": saldo,
+            "Nilai Normal":   100000,
+            "Prioritas":      "🔴 Kritis",
+            "Status":         "Baru",
         })
 
     penalty = safe_int(d["penalty"].get("total_penalty_point", 0))
     if penalty > 0:
         alerts.append({
-            "Tanggal": today_ms,
-            "Platform": "Shopee",
-            "Tipe Alert": "Penalti",
-            "Detail": f"Toko dapat {penalty} poin penalti!",
-            "Nilai Saat Ini": float(penalty),
-            "Nilai Normal": 0.0,
-            "Prioritas": "🔴 Kritis",
-            "Status": "Baru",
+            "Tanggal":        today_ms,
+            "Platform":       "Shopee",
+            "Tipe Alert":     "Penalti",
+            "Detail":         f"Toko dapat {penalty} poin penalti!",
+            "Nilai Saat Ini": penalty,
+            "Nilai Normal":   0,
+            "Prioritas":      "🔴 Kritis",
+            "Status":         "Baru",
         })
 
     issues = safe_int(d["issues"].get("total_count", 0))
     if issues > 0:
         alerts.append({
-            "Tanggal": today_ms,
-            "Platform": "Shopee",
-            "Tipe Alert": "Produk Bermasalah",
-            "Detail": f"{issues} produk bermasalah/melanggar kebijakan.",
-            "Nilai Saat Ini": float(issues),
-            "Nilai Normal": 0.0,
-            "Prioritas": "🟡 Penting",
-            "Status": "Baru",
+            "Tanggal":        today_ms,
+            "Platform":       "Shopee",
+            "Tipe Alert":     "Produk Bermasalah",
+            "Detail":         f"{issues} produk bermasalah/melanggar kebijakan.",
+            "Nilai Saat Ini": issues,
+            "Nilai Normal":   0,
+            "Prioritas":      "🟡 Penting",
+            "Status":         "Baru",
         })
 
     late = safe_int(d["late_orders"].get("total_count", 0))
     if late > 5:
         alerts.append({
-            "Tanggal": today_ms,
-            "Platform": "Shopee",
-            "Tipe Alert": "Order Terlambat",
-            "Detail": f"{late} order terlambat diproses hari ini.",
-            "Nilai Saat Ini": float(late),
-            "Nilai Normal": 5.0,
-            "Prioritas": "🟡 Penting",
-            "Status": "Baru",
+            "Tanggal":        today_ms,
+            "Platform":       "Shopee",
+            "Tipe Alert":     "Order Terlambat",
+            "Detail":         f"{late} order terlambat diproses hari ini.",
+            "Nilai Saat Ini": late,
+            "Nilai Normal":   5,
+            "Prioritas":      "🟡 Penting",
+            "Status":         "Baru",
         })
 
     if alerts:
@@ -369,7 +363,6 @@ def main():
     print(f"🚀 ZEODDA AUTOMATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # Validasi token tersedia
     if not LARK_USER_TOKEN:
         raise Exception("❌ LARK_USER_TOKEN tidak ada! Tambahkan ke GitHub Secrets.")
 
