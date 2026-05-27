@@ -37,7 +37,7 @@ def get_lark_tenant_token() -> str:
         if data.get("code") != 0:
             raise Exception(f"Gagal get tenant token: {data.get('msg')} (code={data.get('code')})")
         _lark_tenant_token = data["tenant_access_token"]
-        print(f"✅ Lark tenant token berhasil di-generate")
+        print(f"✅ Lark tenant token OK")
         return _lark_tenant_token
     except Exception as e:
         raise Exception(f"❌ get_lark_tenant_token error: {e}")
@@ -59,12 +59,10 @@ def safe_int(val):
     if val is None:
         return 0
     if isinstance(val, (dict, list)):
-        print(f"  ⚠️ safe_int got {type(val).__name__}: {repr(val)[:80]}")
         return 0
     try:
         return int(float(str(val)))
-    except Exception as e:
-        print(f"  ⚠️ safe_int conversion error: {repr(val)} → {e}")
+    except:
         return 0
 
 def safe_str(val):
@@ -105,6 +103,8 @@ def shopee_get(path, extra={}):
     try:
         r = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
         data = r.json()
+        if data.get("error") and data.get("error") != "":
+            print(f"  ⚠️ Shopee API error [{path}]: {data.get('error')} - {data.get('message','')[:80]}")
         resp = data.get("response")
         return resp if isinstance(resp, dict) else {}
     except Exception as e:
@@ -128,7 +128,7 @@ def lark_add(table_id, fields):
         result = r.json()
         if result.get("code") != 0:
             print(f"❌ Lark error {result.get('code')}: {result.get('msg')}")
-            print(f"🔍 Fields dikirim: {fields}")
+            print(f"🔍 Fields: {fields}")
         return result
     except Exception as e:
         print(f"❌ Lark request error: {e}")
@@ -157,73 +157,99 @@ def lark_add_batch(table_id, records_list):
 def fetch_all_shopee_data():
     print("📥 Mengambil semua data Shopee...")
 
-    # Script jalan jam 00:00 WIB → ambil data KEMARIN (H-1)
-    now_wib      = datetime.utcnow() + timedelta(hours=7)
+    # Ambil data KEMARIN (H-1) — script jalan jam 00:00 WIB
+    now_wib       = datetime.utcnow() + timedelta(hours=7)
     yesterday_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    ts_start     = int((yesterday_wib - timedelta(hours=7)).timestamp())   # 00:00 WIB → UTC epoch
-    ts_end       = int((yesterday_wib + timedelta(hours=17) - timedelta(seconds=1)).timestamp())  # 23:59:59 WIB
-    date_str     = yesterday_wib.strftime("%Y-%m-%d")
-    yesterday_ms = int(yesterday_wib.timestamp() * 1000)
+    ts_start      = int((yesterday_wib - timedelta(hours=7)).timestamp())
+    ts_end        = int((yesterday_wib + timedelta(hours=17) - timedelta(seconds=1)).timestamp())
+    date_str      = yesterday_wib.strftime("%Y-%m-%d")
+    yesterday_ms  = int(yesterday_wib.timestamp() * 1000)
 
-    print(f"📅 Ambil data kemarin: {date_str} WIB ({ts_start} → {ts_end})")
+    print(f"📅 Data kemarin: {date_str} WIB")
 
-    data = {}
-    data["yesterday_ms"] = yesterday_ms
-    data["date_str"]     = date_str
+    d = {
+        "yesterday_ms": yesterday_ms,
+        "date_str":     date_str,
+        "ts_start":     ts_start,
+        "ts_end":       ts_end,
+    }
 
-    data["shop_info"]  = shopee_get("/api/v2/shop/get_shop_info")
-    data["shop_perf"]  = shopee_get("/api/v2/account_health/get_shop_performance")
-    data["balance"]    = shopee_get("/api/v2/ads/get_total_balance")   # real-time = snapshot jam 00:00 = closing kemarin
-    data["penalty"]    = shopee_get("/api/v2/account_health/get_penalty_point_history")
-    data["late_orders"]= shopee_get("/api/v2/account_health/get_late_orders")
-    data["issues"]     = shopee_get("/api/v2/account_health/get_listings_with_issues")
+    # === SHOP ===
+    d["shop_info"]  = shopee_get("/api/v2/shop/get_shop_info")
+    print(f"  shop_info keys: {list(d['shop_info'].keys()) if d['shop_info'] else 'EMPTY'}")
 
-    # Order kemarin
-    data["orders"] = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time",
-        "time_from":  ts_start,
-        "time_to":    ts_end,
-        "page_size":  100,
+    # === ACCOUNT HEALTH ===
+    d["shop_perf"]   = shopee_get("/api/v2/account_health/get_shop_performance")
+    d["penalty"]     = shopee_get("/api/v2/account_health/get_penalty_point_history")
+    d["late_orders"] = shopee_get("/api/v2/account_health/get_late_orders")
+    d["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
+
+    # === ADS ===
+    d["balance"] = shopee_get("/api/v2/ads/get_total_balance")
+    d["ads"]     = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
+        "start_date": date_str, "end_date": date_str,
     })
-    data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
+    d["toggle"]  = shopee_get("/api/v2/ads/get_shop_toggle_info")
+
+    # === ORDERS ===
+    d["orders"] = shopee_get("/api/v2/order/get_order_list", {
         "time_range_field": "create_time",
-        "time_from":  ts_start,
-        "time_to":    ts_end,
-        "page_size":  100,
-        "order_status": "CANCELLED",
+        "time_from": ts_start, "time_to": ts_end, "page_size": 100,
     })
-    data["returns"] = shopee_get("/api/v2/returns/get_return_list", {
+    d["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time",
+        "time_from": ts_start, "time_to": ts_end,
+        "page_size": 100, "order_status": "CANCELLED",
+    })
+
+    # === RETURNS ===
+    d["returns"] = shopee_get("/api/v2/returns/get_return_list", {
         "page_no": 1, "page_size": 100,
         "create_time_from": ts_start, "create_time_to": ts_end,
     })
 
-    # Income overview kemarin (untuk biaya platform)
-    data["income"] = shopee_get("/api/v2/payment/get_income_overview", {
+    # === PAYMENT / FINANCIAL ===
+    d["income"]  = shopee_get("/api/v2/payment/get_income_overview", {
         "start_date": date_str, "end_date": date_str,
     })
-
-    # Ads performance kemarin
-    data["ads"] = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
-        "start_date": date_str, "end_date": date_str,
+    d["payout"]  = shopee_get("/api/v2/payment/get_payout_info")
+    d["escrow"]  = shopee_get("/api/v2/payment/get_escrow_list", {
+        "release_time_from": ts_start, "release_time_to": ts_end,
+        "page_no": 1, "page_size": 100,
+    })
+    d["billing"] = shopee_get("/api/v2/payment/get_billing_transaction_info", {
+        "create_time_from": ts_start, "create_time_to": ts_end,
+        "page_no": 1, "page_size": 100,
     })
 
-    # Produk aktif (untuk product performance)
+    # === PRODUK — ambil semua item aktif ===
     items_resp = shopee_get("/api/v2/product/get_item_list", {
         "offset": 0, "page_size": 50, "item_status": "NORMAL",
     })
-    data["items"] = items_resp.get("item", []) if isinstance(items_resp, dict) else []
+    d["items"] = items_resp.get("item", []) if isinstance(items_resp, dict) else []
+    item_ids   = [str(i.get("item_id")) for i in d["items"] if i.get("item_id")]
 
-    # === Omzet dari order detail kemarin ===
-    all_orders    = safe_list(data.get("orders", {}), "order_list")
+    # Boosted items
+    boosted_resp = shopee_get("/api/v2/product/get_boosted_list")
+    boosted_ids  = set()
+    if isinstance(boosted_resp, dict):
+        for bi in (boosted_resp.get("item_list") or []):
+            if isinstance(bi, dict):
+                boosted_ids.add(str(bi.get("item_id", "")))
+    d["boosted_ids"] = boosted_ids
+    print(f"  Boosted items: {len(boosted_ids)}")
+
+    # === OMZET dari order detail (include ongkir = buyer_paid_amount) ===
+    all_orders    = safe_list(d.get("orders", {}), "order_list")
     order_sn_list = [o.get("order_sn") for o in all_orders if o.get("order_sn")]
 
-    omzet_harian = 0  # exclude ongkir (total_amount)
-    omzet_gross  = 0  # include ongkir (buyer_paid_amount = sama dengan Seller Center)
+    omzet_harian = 0  # exclude ongkir
+    omzet_gross  = 0  # include ongkir (= Seller Center)
 
     if order_sn_list:
-        print(f"  → Fetching detail {len(order_sn_list)} order kemarin untuk omzet...")
+        print(f"  → Detail {len(order_sn_list)} order...")
         for i in range(0, len(order_sn_list), 50):
-            batch = order_sn_list[i:i+50]
+            batch       = order_sn_list[i:i+50]
             detail_resp = shopee_get("/api/v2/order/get_order_detail", {
                 "order_sn_list": ",".join(batch),
                 "response_optional_fields": "total_amount,buyer_paid_amount,actual_shipping_fee,item_list",
@@ -234,31 +260,145 @@ def fetch_all_shopee_data():
                 if od.get("order_status") in ("CANCELLED", "UNPAID"):
                     continue
                 omzet_harian += safe_int(od.get("total_amount", 0))
-                # buyer_paid_amount = total_amount + ongkir yang dibayar buyer
-                # Jika tidak ada, fallback ke total_amount + actual_shipping_fee
-                buyer_paid = od.get("buyer_paid_amount", 0)
+                buyer_paid    = od.get("buyer_paid_amount", 0)
                 if buyer_paid:
                     omzet_gross += safe_int(buyer_paid)
                 else:
-                    shipping = safe_int(od.get("actual_shipping_fee", 0))
-                    omzet_gross += safe_int(od.get("total_amount", 0)) + shipping
+                    omzet_gross += safe_int(od.get("total_amount", 0)) + safe_int(od.get("actual_shipping_fee", 0))
 
-    data["omzet_harian"] = omzet_harian
-    data["omzet_gross"]  = omzet_gross
+    d["omzet_harian"] = omzet_harian
+    d["omzet_gross"]  = omzet_gross
 
-    print(f"🔍 RAW balance (closing kemarin): {repr(data['balance'])[:100]}")
-    print(f"💰 Omzet Kemarin (exclude ongkir): Rp {omzet_harian:,}")
-    print(f"💰 Omzet Gross   (include ongkir): Rp {omzet_gross:,} ← harusnya sama dengan Seller Center")
-    print(f"   dari {len(order_sn_list)} order")
-    print("✅ Data Shopee berhasil diambil!")
-    return data
+    print(f"💰 Omzet (excl ongkir): Rp {omzet_harian:,} | Gross (incl ongkir): Rp {omzet_gross:,}")
+    print(f"  Balance: Rp {safe_int(d['balance'].get('total_balance',0)):,}")
+    print("✅ Data Shopee OK!")
+    return d
+
+# ============================================================
+# FETCH DATA PER PRODUK (dipanggil sekali, dipakai banyak tabel)
+# ============================================================
+
+def fetch_product_details(d):
+    """
+    Fetch detail semua produk: base_info, extra_info, comment, promotion, ads perf, ams perf.
+    Return dict keyed by item_id (string).
+    """
+    items    = d.get("items", [])
+    date_str = d["date_str"]
+    ts_start = d["ts_start"]
+    ts_end   = d["ts_end"]
+
+    if not items:
+        return {}
+
+    item_ids = [str(i.get("item_id")) for i in items if i.get("item_id")]
+    print(f"  → Fetch detail {len(item_ids)} produk...")
+
+    # --- Base info (batch, max 50) ---
+    base_map = {}
+    for i in range(0, len(item_ids), 50):
+        batch = item_ids[i:i+50]
+        resp  = shopee_get("/api/v2/product/get_item_base_info", {
+            "item_id_list": ",".join(batch),
+        })
+        for item in (resp.get("item_list", []) or []):
+            if isinstance(item, dict):
+                base_map[str(item.get("item_id", ""))] = item
+
+    # --- Extra info (stok, terjual, views) ---
+    extra_map = {}
+    for i in range(0, len(item_ids), 50):
+        batch = item_ids[i:i+50]
+        resp  = shopee_get("/api/v2/product/get_item_extra_info", {
+            "item_id_list": ",".join(batch),
+        })
+        for item in (resp.get("item_list", []) or []):
+            if isinstance(item, dict):
+                extra_map[str(item.get("item_id", ""))] = item
+
+    # --- Promotion (per item, satu per satu karena API tidak batch) ---
+    promo_set = set()
+    for iid in item_ids[:20]:  # limit 20 untuk hemat waktu
+        resp = shopee_get("/api/v2/product/get_item_promotion", {"item_id": int(iid)})
+        if isinstance(resp, dict) and resp.get("promotion_list"):
+            promo_set.add(iid)
+
+    # --- Comment/Review per produk ---
+    comment_map = {}
+    for iid in item_ids[:20]:
+        resp     = shopee_get("/api/v2/product/get_comment", {
+            "item_id": int(iid), "cursor": "", "page_size": 100,
+        })
+        comments = resp.get("comment_list", []) if isinstance(resp, dict) else []
+        if not isinstance(comments, list):
+            comments = []
+        star = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        for c in comments:
+            if isinstance(c, dict):
+                rv = safe_int(c.get("rating_star", 0))
+                if rv in star:
+                    star[rv] += 1
+        total    = len(comments)
+        avg      = sum(k * v for k, v in star.items()) // total if total else 0
+        comment_map[iid] = {"star": star, "total": total, "avg": avg}
+
+    # --- AMS: performa organik per produk ---
+    ams_map = {}
+    for iid in item_ids[:20]:
+        resp = shopee_get("/api/v2/ams/get_product_performance", {
+            "item_id":    int(iid),
+            "start_date": date_str,
+            "end_date":   date_str,
+        })
+        if isinstance(resp, dict):
+            ams_map[iid] = resp
+
+    # --- Ads Product Level: campaign per produk ---
+    camp_resp = shopee_get("/api/v2/ads/get_product_level_campaign_id_list", {
+        "start_date": date_str, "end_date": date_str,
+    })
+    camp_ids = []
+    if isinstance(camp_resp, dict):
+        camp_ids = camp_resp.get("campaign_id_list", []) or []
+
+    ads_perf_map = {}  # keyed by campaign_id
+    camp_setting_map = {}
+    if camp_ids:
+        for i in range(0, len(camp_ids), 50):
+            batch = camp_ids[i:i+50]
+            # Performa harian
+            perf_resp = shopee_get("/api/v2/ads/get_product_campaign_daily_performance", {
+                "start_date": date_str, "end_date": date_str,
+                "campaign_id_list": ",".join(str(c) for c in batch),
+            })
+            for cp in (perf_resp.get("campaign_performance_list", []) or []):
+                if isinstance(cp, dict):
+                    ads_perf_map[str(cp.get("campaign_id", ""))] = cp
+            # Setting (status, bid)
+            setting_resp = shopee_get("/api/v2/ads/get_product_level_campaign_setting_info", {
+                "campaign_id_list": ",".join(str(c) for c in batch),
+            })
+            for cs in (setting_resp.get("campaign_setting_list", []) or []):
+                if isinstance(cs, dict):
+                    camp_setting_map[str(cs.get("campaign_id", ""))] = cs
+
+    return {
+        "base":         base_map,
+        "extra":        extra_map,
+        "promo_set":    promo_set,
+        "comment":      comment_map,
+        "ams":          ams_map,
+        "camp_ids":     camp_ids,
+        "ads_perf":     ads_perf_map,
+        "camp_setting": camp_setting_map,
+    }
 
 # ============================================================
 # INPUT KE LARK BASE
 # ============================================================
 
 def input_daily_overview(d):
-    print("📋 Input Daily Overview (Shopee)...")
+    print("📋 Input Daily Overview...")
 
     shop_perf    = safe_dict(d, "shop_perf")
     overall_perf = safe_dict(shop_perf, "overall_performance")
@@ -272,15 +412,18 @@ def input_daily_overview(d):
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
     returns_list     = safe_list(d.get("returns", {}),          "return_list")
 
+    follower = safe_int(shop_info.get("follower_count", 0))
+    print(f"  follower_count raw: {shop_info.get('follower_count')} → {follower}")
+
     fields = {
         "Tanggal":                d["yesterday_ms"],
         "Platform":               "Shopee",
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
         "Total Retur":            safe_int(len(returns_list)),
-        "Omzet Harian":           safe_int(d.get("omzet_harian", 0)),   # exclude ongkir
-        "Omzet Gross":            safe_int(d.get("omzet_gross", 0)),     # include ongkir (= Seller Center)
-        "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
+        "Omzet Harian":           safe_int(d.get("omzet_harian", 0)),
+        "Omzet Gross":            safe_int(d.get("omzet_gross", 0)),
+        "Follower Toko":          follower,
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
         "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
@@ -288,22 +431,21 @@ def input_daily_overview(d):
         "Saldo Iklan":            safe_int(balance.get("total_balance", 0)),
     }
 
-    print("🔍 Daily Overview:")
-    for k, v in fields.items():
-        print(f"   {k}: {repr(v)}")
-
     result = lark_add(TABLE_DAILY_OVERVIEW, fields)
-    print("✅ Daily Overview done!" if result.get("code") == 0 else "❌ Gagal")
+    if result.get("code") == 0:
+        print(f"✅ Daily Overview OK — {len(all_orders)} order, Rp {d.get('omzet_gross',0):,} gross")
+    else:
+        print("❌ Gagal Daily Overview")
 
 
-def input_product_performance(d):
-    print("⭐ Input Product Performance (Shopee)...")
-    items = d.get("items", [])
+def input_product_performance(d, pd):
+    print("⭐ Input Product Performance...")
+    items    = d.get("items", [])
+    boosted  = d.get("boosted_ids", set())
     if not items:
         print("⚠️ Tidak ada produk, skip.")
         return
 
-    # Nama field review bintang di Lark (dengan emoji)
     REVIEW_FIELD = {
         5: "Review Bintang 5 ⭐⭐⭐⭐⭐",
         4: "Review Bintang 4 ⭐⭐⭐⭐",
@@ -312,145 +454,223 @@ def input_product_performance(d):
         1: "Review Bintang 1 ⭐",
     }
 
-    records    = []
-    debug_done = False
-
+    records = []
     for item in items[:20]:
         if not isinstance(item, dict):
             continue
-        item_id = item.get("item_id")
+        iid       = str(item.get("item_id", ""))
+        base      = pd["base"].get(iid, {})
+        extra     = pd["extra"].get(iid, {})
+        cmt       = pd["comment"].get(iid, {"star": {1:0,2:0,3:0,4:0,5:0}, "total":0, "avg":0})
+        has_promo = iid in pd["promo_set"]
+        is_boost  = iid in boosted
 
-        # Fetch komentar/review
-        comment_resp = shopee_get("/api/v2/product/get_comment", {
-            "item_id": item_id, "cursor": "", "page_size": 100,
-        })
-        comments = comment_resp.get("comment_list", [])
-        if not isinstance(comments, list):
-            comments = []
-
-        star = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
-        for c in comments:
-            if isinstance(c, dict):
-                rv = safe_int(c.get("rating_star", 0))
-                if rv in star:
-                    star[rv] += 1
-        avg = sum(k * v for k, v in star.items()) // len(comments) if comments else 0
-
-        # Fetch detail produk
-        item_detail    = shopee_get("/api/v2/product/get_item_base_info", {
-            "item_id_list": str(item_id),
-        })
-        item_info_list = item_detail.get("item_list", []) if isinstance(item_detail, dict) else []
-        item_info      = item_info_list[0] if item_info_list else {}
-        nama_produk    = safe_str(item_info.get("item_name", item.get("item_name", "")))
-
-        # Harga & stok dari model
-        models = item_info.get("model", []) or []
+        # Nama & harga dari base
+        nama   = safe_str(base.get("item_name", item.get("item_name", "")))
+        models = base.get("model", []) or []
         harga  = 0
-        stok   = 0
         for m in models:
             if not isinstance(m, dict):
                 continue
-            price_info = m.get("price_info", [])
-            if price_info and isinstance(price_info, list):
-                harga = safe_int(price_info[0].get("current_price", 0))
-            stock_info = m.get("stock_info", {})
-            if isinstance(stock_info, dict):
-                stok += safe_int(stock_info.get("total_available_stock", 0))
+            pi = m.get("price_info", [])
+            if pi and isinstance(pi, list):
+                harga = safe_int(pi[0].get("current_price", 0))
+                break
 
-        record = {
+        # Stok, terjual, views dari extra_info
+        stok             = safe_int(extra.get("total_available_stock", 0))
+        terjual_hari_ini = safe_int(extra.get("sold", 0))        # sold hari ini
+        total_terjual    = safe_int(extra.get("overall_sold", 0)) # kumulatif
+        views            = safe_int(extra.get("page_view", 0))
+
+        # Status dari base
+        status_produk = safe_str(base.get("item_status", ""))
+
+        star  = cmt["star"]
+        total = cmt["total"]
+        avg   = cmt["avg"]
+
+        records.append({
             "Tanggal":                    d["yesterday_ms"],
             "Platform":                   "Shopee",
-            "Nama Produk":                nama_produk,
-            "Item ID":                    safe_str(item_id),
+            "Nama Produk":                nama,
+            "Item ID":                    iid,
             "Kategori Produk":            "",
             "Harga Jual":                 harga,
             "Stok Tersisa":               stok,
-            "Terjual Hari Ini":           0,
-            "Total Terjual Kumulatif":    safe_int(item_info.get("sold", 0)),
+            "Terjual Hari Ini":           terjual_hari_ini,
+            "Total Terjual Kumulatif":    total_terjual,
             "Rating Bintang":             safe_int(avg),
-            "Total Review":               safe_int(len(comments)),
-            REVIEW_FIELD[5]:              safe_int(star[5]),
-            REVIEW_FIELD[4]:              safe_int(star[4]),
-            REVIEW_FIELD[3]:              safe_int(star[3]),
-            REVIEW_FIELD[2]:              safe_int(star[2]),
-            REVIEW_FIELD[1]:              safe_int(star[1]),
-            "Review Negatif Baru":        safe_int(star[1] + star[2]),
-            "Views Produk":               0,
-            "Status Boost":               "",
-            "Ada Promo Aktif":            False,
-            "Status Produk":              safe_str(item_info.get("item_status", "")),
+            "Total Review":               safe_int(total),
+            REVIEW_FIELD[5]:              safe_int(star.get(5, 0)),
+            REVIEW_FIELD[4]:              safe_int(star.get(4, 0)),
+            REVIEW_FIELD[3]:              safe_int(star.get(3, 0)),
+            REVIEW_FIELD[2]:              safe_int(star.get(2, 0)),
+            REVIEW_FIELD[1]:              safe_int(star.get(1, 0)),
+            "Review Negatif Baru":        safe_int(star.get(1,0) + star.get(2,0)),
+            "Views Produk":               views,
+            "Status Boost":               "Aktif" if is_boost else "Tidak Aktif",
+            "Ada Promo Aktif":            has_promo,
+            "Status Produk":              status_produk,
             "Revenue Produk":             0,
             "CTR Listing":                "",
             "Conversion Rate":            "",
-        }
-
-        # Debug record pertama — kirim field per field kalau gagal
-        if not debug_done:
-            print(f"🔬 Debug record pertama (item_id={item_id})...")
-            url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_PRODUCT_PERF}/records"
-            test = requests.post(url, headers=get_lark_headers(), json={"fields": record}, timeout=30).json()
-            if test.get("code") != 0:
-                print(f"  ❌ Full record gagal: {test.get('msg')} — kirim field per field...")
-                bad_fields = set()
-                for key, val in record.items():
-                    tr = requests.post(url, headers=get_lark_headers(),
-                        json={"fields": {key: val}}, timeout=30).json()
-                    status = "✅" if tr.get("code") == 0 else "❌"
-                    print(f"    {status} '{key}'" + (f" → {tr.get('msg')}" if tr.get("code") != 0 else ""))
-                    if tr.get("code") != 0:
-                        bad_fields.add(key)
-                for bf in bad_fields:
-                    record.pop(bf, None)
-                print(f"  ⚠️ Di-skip: {bad_fields}")
-            else:
-                print(f"  ✅ Record pertama OK!")
-            debug_done = True
-
-        records.append(record)
+        })
 
     if records:
         result = lark_add_batch(TABLE_PRODUCT_PERF, records)
-        print(f"✅ Product Performance {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal batch")
+        print(f"✅ Product Performance {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
 
 
 def input_ads_shop(d):
-    print("📢 Input Ads Shop Level (Shopee)...")
+    print("📢 Input Ads Shop Level...")
     ads     = safe_dict(d, "ads")
     balance = safe_dict(d, "balance")
+    toggle  = safe_dict(d, "toggle")
 
     fields = {
         "Tanggal":                d["yesterday_ms"],
-        "Platform":               "Shopee",
+        "Platform":               "Shopee Ads",
         "Saldo Iklan":            safe_int(balance.get("total_balance", 0)),
         "Total Spend":            safe_int(ads.get("cost", 0)),
         "Total Impresi":          safe_int(ads.get("impression", 0)),
         "Total Klik":             safe_int(ads.get("click", 0)),
         "Total Order dari Iklan": safe_int(ads.get("order", 0)),
         "Revenue dari Iklan":     safe_int(ads.get("order_amount", 0)),
+        "Toggle Iklan Aktif":     toggle.get("toggle_status") == 1,
     }
     result = lark_add(TABLE_ADS_SHOP, fields)
-    print("✅ Ads Shop Level done!" if result.get("code") == 0 else "❌ Gagal")
+    print("✅ Ads Shop Level OK!" if result.get("code") == 0 else "❌ Gagal Ads Shop")
+
+
+def input_ads_product_level(d, pd):
+    print("🎯 Input Ads Product Level...")
+
+    camp_ids    = pd.get("camp_ids", [])
+    ads_perf    = pd.get("ads_perf", {})
+    camp_setting= pd.get("camp_setting", {})
+
+    if not camp_ids:
+        print("⚠️ Tidak ada campaign produk, skip.")
+        return
+
+    records = []
+    for cid in [str(c) for c in camp_ids]:
+        perf    = ads_perf.get(cid, {})
+        setting = camp_setting.get(cid, {})
+        if not perf:
+            continue
+
+        status_raw = safe_str(setting.get("campaign_status", perf.get("campaign_status", "")))
+        # Normalize status ke Single Select options: Aktif, Pause, Habis
+        status_map = {
+            "ongoing": "Aktif", "active": "Aktif",
+            "paused": "Pause",  "pause": "Pause",
+            "ended": "Habis",   "expired": "Habis",
+        }
+        status = status_map.get(status_raw.lower(), status_raw)
+
+        records.append({
+            "Tanggal":            d["yesterday_ms"],
+            "Platform":           "Shopee Ads",
+            "Nama Produk":        safe_str(perf.get("campaign_name", setting.get("campaign_name", ""))),
+            "Campaign ID":        cid,
+            "Spend":              safe_int(perf.get("cost", 0)),
+            "Impresi":            safe_int(perf.get("impression", 0)),
+            "Klik":               safe_int(perf.get("click", 0)),
+            "Order dari Iklan":   safe_int(perf.get("order", 0)),
+            "Revenue dari Iklan": safe_int(perf.get("order_amount", 0)),
+            "Status Campaign":    status,
+            "Rekomendasi Bid":    safe_int(setting.get("bid", 0)),
+        })
+
+    if records:
+        result = lark_add_batch(TABLE_ADS_PRODUCT, records)
+        print(f"✅ Ads Product Level {len(records)} campaign!" if result.get("code") == 0 else "❌ Gagal")
+    else:
+        print("⚠️ Tidak ada data performa campaign.")
+
+
+def input_komparasi_produk(d, pd):
+    print("📊 Input Komparasi Produk...")
+    items = d.get("items", [])
+    if not items:
+        print("⚠️ Tidak ada produk, skip.")
+        return
+
+    records = []
+    for item in items[:20]:
+        if not isinstance(item, dict):
+            continue
+        iid      = str(item.get("item_id", ""))
+        base     = pd["base"].get(iid, {})
+        cmt      = pd["comment"].get(iid, {"avg": 0})
+        ams      = pd["ams"].get(iid, {})
+        is_boost = iid in d.get("boosted_ids", set())
+        nama     = safe_str(base.get("item_name", item.get("item_name", "")))
+
+        records.append({
+            "Tanggal":            d["yesterday_ms"],
+            "Nama Produk":        nama,
+            "Platform":           "Shopee",
+            "Rating Bintang":     safe_int(cmt.get("avg", 0)),
+            "Terjual Organik":    safe_int(ams.get("sold_count", 0)),
+            "Revenue Organik":    safe_int(ams.get("order_amount", 0)),
+            "Terjual dari Iklan": 0,   # dari Ads Product Level
+            "Revenue dari Iklan": 0,
+            "Spend Iklan":        0,
+            "Status Boost":       "Aktif" if is_boost else "Tidak Aktif",
+            "Rekomendasi":        "",
+        })
+
+    if records:
+        result = lark_add_batch(TABLE_KOMPARASI, records)
+        print(f"✅ Komparasi {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal Komparasi")
 
 
 def input_financial(d):
-    print("💰 Input Financial Summary (Shopee)...")
-    income = safe_dict(d, "income")
-    ads    = safe_dict(d, "ads")
+    print("💰 Input Financial Summary...")
+
+    income  = safe_dict(d, "income")
+    ads     = safe_dict(d, "ads")
+    payout  = safe_dict(d, "payout")
+    escrow  = safe_dict(d, "escrow")
+    billing = safe_dict(d, "billing")
+    returns = safe_dict(d, "returns")
+
+    # Biaya platform dari billing transactions
+    biaya = 0
+    for txn in (billing.get("transactions", []) or []):
+        if isinstance(txn, dict):
+            biaya += safe_int(abs(float(txn.get("amount", 0) or 0)))
+
+    # Escrow pending
+    escrow_total = safe_int(escrow.get("total_escrow_amount", 0))
+
+    # Pencairan hari ini
+    pencairan = safe_int(payout.get("total_payout_amount", 0))
+
+    # Total retur (nilai)
+    returns_list = safe_list(d.get("returns", {}), "return_list")
+    total_retur_val = sum(safe_int(r.get("refund_amount", 0)) for r in returns_list if isinstance(r, dict))
 
     fields = {
-        "Tanggal":        d["yesterday_ms"],
-        "Platform":       "Shopee",
-        "Gross Revenue":  safe_int(d.get("omzet_harian", 0)),
-        "Biaya Platform": safe_int((income.get("escrow_amount") or {}).get("released_amount", 0)),
-        "Spend Iklan":    safe_int(ads.get("cost", 0)),
+        "Tanggal":              d["yesterday_ms"],
+        "Platform":             "Shopee",
+        "Gross Revenue":        safe_int(d.get("omzet_gross", 0)),
+        "Biaya Platform":       biaya if biaya else safe_int((income.get("escrow_amount") or {}).get("released_amount", 0)),
+        "Spend Iklan":          safe_int(ads.get("cost", 0)),
+        "Dana Escrow Pending":  escrow_total,
+        "Pencairan Hari Ini":   pencairan,
+        "Total Retur":          total_retur_val,
     }
+
     result = lark_add(TABLE_FINANCIAL, fields)
-    print("✅ Financial Summary done!" if result.get("code") == 0 else "❌ Gagal")
+    print("✅ Financial OK!" if result.get("code") == 0 else "❌ Gagal Financial")
 
 
 def input_alerts(d):
-    print("🚨 Cek Alert Log (Shopee)...")
+    print("🚨 Cek Alert Log...")
     balance = safe_dict(d, "balance")
     penalty = safe_dict(d, "penalty")
     issues  = safe_dict(d, "issues")
@@ -472,7 +692,7 @@ def input_alerts(d):
         alerts.append({
             "Tanggal": d["yesterday_ms"], "Platform": "Shopee",
             "Tipe Alert": "Penalti",
-            "Detail": f"Toko dapat {pen} poin penalti!",
+            "Detail": f"Toko kena {pen} poin penalti!",
             "Nilai Saat Ini": pen, "Nilai Normal": 0,
             "Prioritas": "🔴 Kritis", "Status": "Baru",
         })
@@ -499,136 +719,9 @@ def input_alerts(d):
 
     if alerts:
         result = lark_add_batch(TABLE_ALERT_LOG, alerts)
-        print(f"✅ {len(alerts)} alert dibuat!" if result.get("code") == 0 else "❌ Gagal")
+        print(f"✅ {len(alerts)} alert dibuat!" if result.get("code") == 0 else "❌ Gagal Alert")
     else:
-        print("✅ Tidak ada alert hari ini!")
-
-# ============================================================
-# ADS PRODUCT LEVEL
-# ============================================================
-
-def input_ads_product_level(d):
-    print("🎯 Input Ads Product Level (Shopee)...")
-
-    date_str     = d["date_str"]
-    yesterday_ms = d["yesterday_ms"]
-
-    # Step 1: ambil list campaign ID per produk
-    campaign_list_resp = shopee_get("/api/v2/ads/get_product_level_campaign_id_list", {
-        "start_date": date_str, "end_date": date_str,
-    })
-    campaign_ids = []
-    if isinstance(campaign_list_resp, dict):
-        campaign_ids = campaign_list_resp.get("campaign_id_list", []) or []
-
-    if not campaign_ids:
-        print("⚠️ Tidak ada campaign produk kemarin, skip Ads Product Level.")
-        return
-
-    print(f"  → {len(campaign_ids)} campaign ID ditemukan")
-
-    # Step 2: ambil performa per campaign
-    records = []
-    for i in range(0, len(campaign_ids), 50):
-        batch = campaign_ids[i:i+50]
-        perf_resp = shopee_get("/api/v2/ads/get_product_campaign_daily_performance", {
-            "start_date": date_str,
-            "end_date":   date_str,
-            "campaign_id_list": ",".join(str(c) for c in batch),
-        })
-        perf_list = perf_resp.get("campaign_performance_list", []) if isinstance(perf_resp, dict) else []
-
-        for camp in (perf_list or []):
-            if not isinstance(camp, dict):
-                continue
-            records.append({
-                "Tanggal":              yesterday_ms,
-                "Platform":             "Shopee Ads",
-                "Nama Produk":          safe_str(camp.get("campaign_name", "")),
-                "Campaign ID":          safe_str(camp.get("campaign_id", "")),
-                "Spend":                safe_int(camp.get("cost", 0)),
-                "Impresi":              safe_int(camp.get("impression", 0)),
-                "Klik":                 safe_int(camp.get("click", 0)),
-                "Order dari Iklan":     safe_int(camp.get("order", 0)),
-                "Revenue dari Iklan":   safe_int(camp.get("order_amount", 0)),
-                "Status Campaign":      safe_str(camp.get("campaign_status", "")),
-                "Rekomendasi Bid":      0,
-            })
-
-    if records:
-        result = lark_add_batch(TABLE_ADS_PRODUCT, records)
-        print(f"✅ Ads Product Level {len(records)} campaign!" if result.get("code") == 0 else "❌ Gagal")
-    else:
-        print("⚠️ Tidak ada data performa campaign.")
-
-
-# ============================================================
-# KOMPARASI PRODUK
-# ============================================================
-
-def input_komparasi_produk(d):
-    print("📊 Input Komparasi Produk (Shopee)...")
-
-    date_str     = d["date_str"]
-    yesterday_ms = d["yesterday_ms"]
-    items        = d.get("items", [])
-
-    if not items:
-        print("⚠️ Tidak ada produk, skip Komparasi.")
-        return
-
-    records = []
-    for item in items[:20]:
-        if not isinstance(item, dict):
-            continue
-        item_id = item.get("item_id")
-
-        # Fetch detail produk untuk nama & rating
-        item_detail    = shopee_get("/api/v2/product/get_item_base_info", {
-            "item_id_list": str(item_id),
-        })
-        item_info_list = item_detail.get("item_list", []) if isinstance(item_detail, dict) else []
-        item_info      = item_info_list[0] if item_info_list else {}
-        nama_produk    = safe_str(item_info.get("item_name", item.get("item_name", "")))
-
-        # Fetch performa organik per produk
-        perf_resp = shopee_get("/api/v2/product/get_product_performance", {
-            "item_id":    item_id,
-            "start_date": date_str,
-            "end_date":   date_str,
-        })
-        terjual_organik  = safe_int(perf_resp.get("sold_count", 0)) if isinstance(perf_resp, dict) else 0
-        revenue_organik  = safe_int(perf_resp.get("order_amount", 0)) if isinstance(perf_resp, dict) else 0
-        views            = safe_int(perf_resp.get("page_view", 0)) if isinstance(perf_resp, dict) else 0
-
-        # Rating dari comment
-        comment_resp = shopee_get("/api/v2/product/get_comment", {
-            "item_id": item_id, "cursor": "", "page_size": 10,
-        })
-        comments = comment_resp.get("comment_list", []) if isinstance(comment_resp, dict) else []
-        if not isinstance(comments, list):
-            comments = []
-        star_sum   = sum(safe_int(c.get("rating_star", 0)) for c in comments if isinstance(c, dict))
-        avg_rating = star_sum // len(comments) if comments else 0
-
-        records.append({
-            "Tanggal":           yesterday_ms,
-            "Nama Produk":       nama_produk,
-            "Platform":          "Shopee",
-            "Rating Bintang":    safe_int(avg_rating),
-            "Terjual Organik":   terjual_organik,
-            "Revenue Organik":   revenue_organik,
-            "Terjual dari Iklan":0,   # akan diisi dari Ads Product Level nanti
-            "Revenue dari Iklan":0,
-            "Spend Iklan":       0,
-            "Status Boost":      "",
-            "Rekomendasi":       "",
-        })
-
-    if records:
-        result = lark_add_batch(TABLE_KOMPARASI, records)
-        print(f"✅ Komparasi Produk {len(records)} produk!" if result.get("code") == 0 else "❌ Gagal")
-
+        print("✅ Tidak ada alert.")
 
 # ============================================================
 # MAIN
@@ -646,19 +739,26 @@ def main():
     print("\n" + "─" * 40)
     print("🛒 SHOPEE")
     print("─" * 40)
+
+    # Ambil semua data Shopee
     shopee_data = fetch_all_shopee_data()
 
-    print("\n📤 Menginput data ke Lark Base...")
+    # Fetch detail produk sekali, dipakai 3 tabel sekaligus
+    print("\n🔍 Fetch detail produk...")
+    product_details = fetch_product_details(shopee_data)
+
+    # Input ke semua tabel
+    print("\n📤 Input ke Lark Base...")
     input_daily_overview(shopee_data)
-    input_product_performance(shopee_data)
+    input_product_performance(shopee_data, product_details)
     input_ads_shop(shopee_data)
-    input_ads_product_level(shopee_data)
-    input_komparasi_produk(shopee_data)
+    input_ads_product_level(shopee_data, product_details)
+    input_komparasi_produk(shopee_data, product_details)
     input_financial(shopee_data)
     input_alerts(shopee_data)
 
     print("\n" + "=" * 60)
-    print("✅ SELESAI! Semua data sudah masuk ke Lark Base.")
+    print("✅ SELESAI!")
     print("=" * 60)
 
 if __name__ == "__main__":
