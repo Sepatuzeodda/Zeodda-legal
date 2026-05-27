@@ -205,7 +205,7 @@ def input_daily_overview(d):
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
         "Total Retur":            safe_int(len(returns_list)),
-        "Omzet Harian":           safe_int(income.get("total_income", 0)),
+        "Omzet Harian":           safe_int((income.get("total_income") or {}).get("released_amount", 0)),
         "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
@@ -297,8 +297,8 @@ def input_financial(d):
     fields = {
         "Tanggal":        today_ms,
         "Platform":       "Shopee",
-        "Gross Revenue":  safe_int(income.get("total_income", 0)),
-        "Biaya Platform": safe_int(income.get("escrow_amount", 0)),
+        "Gross Revenue":  safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Biaya Platform": safe_int((income.get("escrow_amount") or {}).get("released_amount", 0)),
         "Spend Iklan":    safe_int(ads.get("cost", 0)),
     }
     result = lark_add(TABLE_FINANCIAL, fields)
