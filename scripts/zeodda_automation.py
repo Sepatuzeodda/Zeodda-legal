@@ -141,10 +141,8 @@ def shopee_get(path, extra={}):
 # ============================================================
 
 def get_lark_headers():
-    if not LARK_USER_TOKEN:
-        raise Exception("LARK_USER_TOKEN tidak ditemukan!")
     return {
-        "Authorization": f"Bearer {LARK_USER_TOKEN}",
+        "Authorization": f"Bearer {get_lark_tenant_token()}",
         "Content-Type": "application/json",
     }
 
@@ -797,9 +795,10 @@ def main():
     print(f"🚀 ZEODDA AUTOMATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    if not LARK_USER_TOKEN:
-        raise Exception("❌ LARK_USER_TOKEN tidak ada!")
-    print("✅ Lark user token tersedia")
+    if not LARK_APP_ID or not LARK_APP_SECRET:
+        raise Exception("❌ LARK_APP_ID atau LARK_APP_SECRET tidak ada!")
+    # Generate tenant token sekali di awal — akan di-cache untuk seluruh run
+    get_lark_tenant_token()
 
     # --------------------------------------------------------
     # SHOPEE
