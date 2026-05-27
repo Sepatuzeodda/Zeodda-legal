@@ -333,52 +333,51 @@ def fetch_all_tiktok_data():
 
     data = {}
 
-    # --- Orders ---
+    # --- Orders (V2) ---
     print("  → Fetching orders...")
-    orders_resp = tiktok_post("/api/orders/search", body={}, extra={
-        "create_time_from": str(ts_start),
-        "create_time_to":   str(ts_end),
-        "page_size":        "100",
+    orders_resp = tiktok_post("/api/v2/orders/search", body={
+        "create_time_from": ts_start,
+        "create_time_to":   ts_end,
+        "page_size":        100,
     })
-    data["orders"] = orders_resp.get("order_list", []) if orders_resp else []
+    data["orders"] = orders_resp.get("orders", []) if orders_resp else []
 
-    # --- Order details (batch 50) untuk revenue & units ---
+    # --- Order details (V2, batch 50) untuk revenue & units ---
     print("  → Fetching order details...")
-    order_ids = [o["order_id"] for o in data["orders"] if o.get("order_id")]
+    order_ids = [o["id"] for o in data["orders"] if o.get("id")]
     all_details = []
     for i in range(0, len(order_ids), 50):
         batch = order_ids[i:i+50]
-        detail_resp = tiktok_post("/api/orders/detail/query", body={"order_id_list": batch})
-        all_details.extend(detail_resp.get("order_list", []) if detail_resp else [])
+        detail_resp = tiktok_post("/api/v2/orders/detail/query", body={"order_id_list": batch})
+        all_details.extend(detail_resp.get("orders", []) if detail_resp else [])
     data["order_details"] = all_details
 
-    # --- Products (paginated) ---
+    # --- Products (V2, paginated) ---
     print("  → Fetching products...")
     all_products = []
-    page = 1
+    page_token = ""
     while True:
-        prod_resp = tiktok_post("/api/products/search", body={}, extra={
-            "page_size":   "100",
-            "page_number": str(page),
-        })
+        body = {"page_size": 100}
+        if page_token:
+            body["page_token"] = page_token
+        prod_resp = tiktok_post("/api/v2/products/search", body=body)
         if not prod_resp:
             break
         products = prod_resp.get("products", [])
         all_products.extend(products)
-        total = prod_resp.get("total_count", 0)
-        if not products or len(all_products) >= total:
+        page_token = prod_resp.get("next_page_token", "")
+        if not products or not page_token:
             break
-        page += 1
     data["products"] = all_products
 
-    # --- Finance settlements ---
+    # --- Finance transactions (V2) ---
     print("  → Fetching finance...")
-    finance_resp = tiktok_get("/api/finance/settlements", {
+    finance_resp = tiktok_get("/api/v2/finance/transactions", {
         "create_time_from": str(ts_start),
         "create_time_to":   str(ts_end),
         "page_size":        "100",
     })
-    data["finance"] = finance_resp.get("statement_list", []) if finance_resp else []
+    data["finance"] = finance_resp.get("transactions", []) if finance_resp else []
 
     print(f"🔍 TikTok: {len(data['orders'])} orders, {len(data['products'])} produk, {len(data['finance'])} transaksi")
     print("✅ Data TikTok Shop berhasil diambil!")
@@ -595,15 +594,15 @@ def input_tiktok_daily_overview(tiktok_data, yesterday: datetime):
     for o in order_details:
         if not isinstance(o, dict):
             continue
-        status = o.get("order_status", "")
+        status = o.get("status", o.get("order_status", ""))
         if status == "CANCELLED":
             cancelled_count += 1
-        # Revenue: payment_info.total_amount dalam sen (/ 100 → Rupiah)
-        payment = o.get("payment_info", {}) or {}
+        # Revenue: payment.total_amount (V2) atau payment_info.total_amount (V1)
+        payment = o.get("payment", o.get("payment_info", {})) or {}
         if status not in ("CANCELLED", "UNPAID"):
             total_revenue += safe_int(float(payment.get("total_amount", 0) or 0) / 100)
         # Units
-        for item in (o.get("item_list", []) or []):
+        for item in (o.get("line_items", o.get("item_list", [])) or []):
             if isinstance(item, dict) and status not in ("CANCELLED",):
                 units_sold += safe_int(item.get("quantity", 0))
         # Returns
@@ -712,18 +711,19 @@ def input_tiktok_financial(tiktok_data, yesterday: datetime):
     for txn in (transactions or []):
         if not isinstance(txn, dict):
             continue
-        txn_type = safe_str(txn.get("transaction_type", ""))
-        # TikTok amount: dalam unit terkecil (fen/sen) → bagi 100
+        # V2: transaction_type atau type
+        txn_type = safe_str(txn.get("transaction_type", txn.get("type", "")))
+        # V2: amount dalam unit terkecil → bagi 100
         amount = safe_int(float(txn.get("amount", 0) or 0) / 100)
 
-        if txn_type in ("ORDER", "SALE", "SETTLEMENT"):
+        if txn_type in ("ORDER", "SALE", "SETTLEMENT", "RELEASED"):
             gross_revenue += amount
-        elif txn_type in ("FEE", "COMMISSION", "SERVICE_FEE", "PLATFORM_FEE"):
+        elif txn_type in ("FEE", "COMMISSION", "SERVICE_FEE", "PLATFORM_FEE", "TRANSACTION_FEE"):
             biaya_platform += abs(amount)
         elif txn_type in ("ADS_FEE", "ADVERTISEMENT"):
             spend_iklan += abs(amount)
-        elif txn_type in ("REFUND", "RETURN"):
-            gross_revenue -= abs(amount)  # kurangi gross revenue
+        elif txn_type in ("REFUND", "RETURN", "REVERSE"):
+            gross_revenue -= abs(amount)
 
     fields = {
         "Tanggal":        yesterday_ms,
