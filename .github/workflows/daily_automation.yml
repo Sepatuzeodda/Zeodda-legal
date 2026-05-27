@@ -1,5 +1,4 @@
 name: Zeodda Daily Automation
-
 on:
   schedule:
     - cron: '0 17 * * *'  # Jam 00:00 WIB = 17:00 UTC
@@ -8,7 +7,7 @@ on:
 jobs:
   run-automation:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -23,13 +22,17 @@ jobs:
 
       - name: Run Zeodda Automation
         env:
-          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
-          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
-          SHOPEE_SHOP_ID: ${{ secrets.SHOPEE_SHOP_ID }}
-          SHOPEE_ACCESS_TOKEN: ${{ secrets.SHOPEE_ACCESS_TOKEN }}
-          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
-          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          LARK_USER_TOKEN: ${{ secrets.LARK_USER_TOKEN }}
+          SHOPEE_PARTNER_ID:         ${{ secrets.SHOPEE_PARTNER_ID }}
+          SHOPEE_PARTNER_KEY:        ${{ secrets.SHOPEE_PARTNER_KEY }}
+          SHOPEE_SHOP_ID:            ${{ secrets.SHOPEE_SHOP_ID }}
+          SHOPEE_ACCESS_TOKEN:       ${{ secrets.SHOPEE_ACCESS_TOKEN }}
+          LARK_APP_ID:               ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET:           ${{ secrets.LARK_APP_SECRET }}
+          TIKTOK_SHOP_APP_KEY:       ${{ secrets.TIKTOK_SHOP_APP_KEY }}
+          TIKTOK_SHOP_APP_SECRET:    ${{ secrets.TIKTOK_SHOP_APP_SECRET }}
+          TIKTOK_SHOP_ACCESS_TOKEN:  ${{ secrets.TIKTOK_SHOP_ACCESS_TOKEN }}
+          TIKTOK_SHOP_REFRESH_TOKEN: ${{ secrets.TIKTOK_SHOP_REFRESH_TOKEN }}
+          TIKTOK_SHOP_SHOP_ID:       ${{ secrets.TIKTOK_SHOP_SHOP_ID }}
         run: python scripts/zeodda_automation.py
 
       - name: Notify success
