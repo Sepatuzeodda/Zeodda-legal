@@ -1,184 +1,115 @@
 """
-zeodda_helpers.py
-Shared utilities untuk semua Zeodda automation scripts.
-Import: from zeodda_helpers import *
+scripts/zeodda_daily_overview.py
+Mengambil data ringkasan harian dari Shopee API dan menyimpannya ke Lark Base TABLE_DAILY_OVERVIEW.
+Revisi: Memperbaiki pemanggilan lark_init() yang tidak mengembalikan nilai (None) agar tidak memicu TypeError.
 """
 
-import hmac
-import hashlib
-import time
-import requests
-import os
-from datetime import datetime, timedelta
+from zeodda_helpers import *
 
-# ============================================================
-# CONFIG - SHOPEE
-# ============================================================
-
-SHOPEE_PARTNER_ID   = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
-SHOPEE_PARTNER_KEY  = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
-SHOPEE_SHOP_ID      = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
-SHOPEE_ACCESS_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
-SHOPEE_BASE_URL     = "https://partner.shopeemobile.com"
-
-# ============================================================
-# CONFIG - LARK
-# ============================================================
-
-LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
-LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
-LARK_APP_TOKEN  = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
-LARK_BASE_URL   = "https://open.larksuite.com"
-
-# Table IDs
-TABLE_DAILY_OVERVIEW = "tblSVQG08nHr7tXD"
-TABLE_PRODUCT_PERF   = "tblRlDzWXK5gQXzT"
-TABLE_ADS_SHOP       = "tbl6EhWSzZumBR4L"
-TABLE_ADS_PRODUCT    = "tbl3r112gUTEhHCe"
-TABLE_KOMPARASI      = "tblZoIIwUj0RN93p"
-TABLE_FINANCIAL      = "tblLh7liZZxPzEpl"
-TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
-
-# ============================================================
-# SAFE TYPE HELPERS
-# ============================================================
-
-def safe_int(val):
-    if val is None:
-        return 0
-    if isinstance(val, (dict, list)):
-        return 0
+def main():
     try:
-        return int(float(str(val)))
-    except:
-        return 0
+        # Perbaikan: lark_init() di zeodda_helpers.py tidak me-return apapun (None).
+        # Jangan melakukan unpacking variable seperti `token, app_token = lark_init()` karena memicu TypeError.
+        lark_init() 
+        
+        # Ambil range waktu kemarin WIB
+        date_info = get_yesterday_range()
+        yesterday_str = date_info["date_str"] # Format YYYY-MM-DD
+        
+        print(f"🚀 Memulai penarikan data Daily Overview untuk tanggal: {yesterday_str}")
+        
+        # 1. Ambil Data Performa Toko (get_shop_performance)
+        perf_data = shopee_get("/api/v2/seller_data/get_shop_performance")
+        shop_score = safe_int(perf_data.get("overall_rating"))
+        
+        # 2. Ambil Data Poin Penalti (get_penalty_point_history)
+        penalty_data = shopee_get("/api/v2/seller_data/get_penalty_point_history")
+        penalty_points = safe_int(penalty_data.get("total_penalty_points"))
+        
+        # 3. Ambil Data Order Terlambat (get_late_orders)
+        late_data = shopee_get("/api/v2/seller_data/get_late_orders")
+        late_orders = safe_int(late_data.get("total_late_orders"))
+        
+        # 4. Ambil Data Produk Bermasalah (get_listings_with_issues)
+        issues_data = shopee_get("/api/v2/product/get_listings_with_issues")
+        issue_products = safe_int(issues_data.get("total_issues"))
+        
+        # 5. Ambil Data Saldo Iklan (get_total_balance)
+        ads_balance_data = shopee_get("/api/v2/ads/get_total_balance")
+        ads_balance = safe_int(ads_balance_data.get("total_balance"))
+        
+        # 6. Ambil Data Order dan Omzet (get_order_list & get_order_detail)
+        order_params = {
+            "time_range_field": "create_time",
+            "time_from": date_info["ts_start"],
+            "time_to": date_info["ts_end"],
+            "page_size": 100
+        }
+        
+        total_order_masuk = 0
+        total_order_batal = 0
+        omzet_harian = 0 
+        omzet_gross = 0  
+        
+        order_list_res = shopee_get("/api/v2/order/get_order_list", order_params)
+        order_ids = [o.get("order_sn") for o in safe_list(order_list_res, "order_list")]
+        
+        if order_ids:
+            for i in range(0, len(order_ids), 50):
+                batch_ids = order_ids[i:i+50]
+                detail_res = shopee_get("/api/v2/order/get_order_detail", {"order_sn_list": ",".join(batch_ids)})
+                for order in safe_list(detail_res, "order_list"):
+                    total_order_masuk += 1
+                    status = order.get("order_status", "")
+                    escrow_amount = safe_int(safe_dict(order, "financial_mechanism").get("escrow_amount"))
+                    total_amount = safe_int(order.get("total_amount"))
+                    
+                    if status == "CANCELLED":
+                        total_order_batal += 1
+                    elif status in ["COMPLETED", "PROCESSED", "SHIPPED"]:
+                        omzet_harian += escrow_amount
+                        omzet_gross += total_amount
+                    else:
+                        omzet_gross += total_amount
 
-def safe_str(val):
-    if val is None or isinstance(val, (dict, list)):
-        return ""
-    return str(val)
+        # 7. Ambil Data Retur (get_return_list)
+        return_params = {
+            "create_time_from": date_info["ts_start"],
+            "create_time_to": date_info["ts_end"],
+            "page_size": 100
+        }
+        return_res = shopee_get("/api/v2/return/get_return_list", return_params)
+        total_retur = len(safe_list(return_res, "return_list"))
 
-def safe_dict(d, key):
-    if not isinstance(d, dict):
-        return {}
-    v = d.get(key, {})
-    return v if isinstance(v, dict) else {}
-
-def safe_list(d, key):
-    if not isinstance(d, dict):
-        return []
-    v = d.get(key, [])
-    return v if isinstance(v, list) else []
-
-# ============================================================
-# TANGGAL HELPERS
-# ============================================================
-
-def get_yesterday_range():
-    """
-    Return dict berisi semua format tanggal kemarin yang dibutuhkan API.
-    Script jalan jam 00:00 WIB → ambil data H-1.
-    """
-    now_wib       = datetime.utcnow() + timedelta(hours=7)
-    yesterday_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-
-    return {
-        "yesterday_ms":  int(yesterday_wib.timestamp() * 1000),       # Lark timestamp
-        "date_str":      yesterday_wib.strftime("%Y-%m-%d"),           # YYYY-MM-DD (Payment API)
-        "date_str_dmy":  yesterday_wib.strftime("%d-%m-%Y"),           # DD-MM-YYYY (Ads API)
-        "ts_start":      int((yesterday_wib - timedelta(hours=7)).timestamp()),
-        "ts_end":        int((yesterday_wib + timedelta(hours=17) - timedelta(seconds=1)).timestamp()),
-        "label":         yesterday_wib.strftime("%Y-%m-%d"),
-    }
-
-# ============================================================
-# SHOPEE HELPERS
-# ============================================================
-
-def shopee_sign(path, timestamp):
-    base = f"{SHOPEE_PARTNER_ID}{path}{timestamp}{SHOPEE_ACCESS_TOKEN}{SHOPEE_SHOP_ID}"
-    return hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
-
-def shopee_get(path, extra={}):
-    ts = int(time.time())
-    params = {
-        "partner_id":   SHOPEE_PARTNER_ID,
-        "timestamp":    ts,
-        "access_token": SHOPEE_ACCESS_TOKEN,
-        "shop_id":      SHOPEE_SHOP_ID,
-        "sign":         shopee_sign(path, ts),
-    }
-    params.update(extra)
-    try:
-        r    = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
-        data = r.json()
-        if data.get("error") and data.get("error") != "":
-            print(f"  ⚠️ [{path}]: {data.get('error')} - {data.get('message','')[:80]}")
-        resp = data.get("response")
-        return resp if isinstance(resp, dict) else {}
+        # 8. Mapping fields ke Lark Base
+        lark_fields = {
+            "Tanggal": yesterday_str,
+            "Platform": "Shopee",
+            "Total Order Masuk": total_order_masuk,
+            "Total Order Dibatalkan": total_order_batal,
+            "Total Retur": total_retur,
+            "Omzet Harian": omzet_harian,
+            "Omzet Gross": omzet_gross,
+            "Follower Toko": 0, 
+            "Skor Performa Toko": shop_score,
+            "Poin Penalti": penalty_points,
+            "Order Terlambat": late_orders,
+            "Produk Bermasalah": issue_products,
+            "Saldo Iklan": ads_balance
+        }
+        
+        # 9. Push data ke Lark Base
+        print(f"📤 Mengirim data ke Lark Base...")
+        res = lark_add(TABLE_DAILY_OVERVIEW, lark_fields)
+        
+        if res.get("code") == 0:
+            print("✅ Sukses sinkronisasi Daily Overview ke Lark Base.")
+        else:
+            print(f"❌ Gagal sinkronisasi. Response: {res}")
+            
     except Exception as e:
-        print(f"  ❌ Request error {path}: {e}")
-        return {}
+        print(f"💥 Terjadi fatal error pada script: {e}")
+        raise e # Re-raise error agar GitHub Actions menandakan step ini gagal
 
-# ============================================================
-# LARK HELPERS
-# ============================================================
-
-_lark_tenant_token = None
-
-def get_lark_tenant_token() -> str:
-    global _lark_tenant_token
-    if _lark_tenant_token:
-        return _lark_tenant_token
-    url = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
-    try:
-        r    = requests.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
-        data = r.json()
-        if data.get("code") != 0:
-            raise Exception(f"code={data.get('code')} msg={data.get('msg')}")
-        _lark_tenant_token = data["tenant_access_token"]
-        print("✅ Lark token OK")
-        return _lark_tenant_token
-    except Exception as e:
-        raise Exception(f"❌ Lark token error: {e}")
-
-def get_lark_headers():
-    return {
-        "Authorization": f"Bearer {get_lark_tenant_token()}",
-        "Content-Type":  "application/json",
-    }
-
-def lark_add(table_id, fields):
-    url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records"
-    try:
-        r      = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
-        result = r.json()
-        if result.get("code") != 0:
-            print(f"  ❌ Lark error {result.get('code')}: {result.get('msg')}")
-            print(f"     Fields: {fields}")
-        return result
-    except Exception as e:
-        print(f"  ❌ Lark request error: {e}")
-        return {"code": -1}
-
-def lark_add_batch(table_id, records_list):
-    if not records_list:
-        return {"code": 0}
-    url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/batch_create"
-    try:
-        r      = requests.post(url, headers=get_lark_headers(),
-                     json={"records": [{"fields": f} for f in records_list]}, timeout=30)
-        result = r.json()
-        if result.get("code") != 0:
-            print(f"  ❌ Lark batch error {result.get('code')}: {result.get('msg')}")
-            print(f"     Sample: {records_list[0]}")
-        return result
-    except Exception as e:
-        print(f"  ❌ Lark batch error: {e}")
-        return {"code": -1}
-
-def lark_init():
-    """Wajib dipanggil di awal setiap script."""
-    if not LARK_APP_ID or not LARK_APP_SECRET:
-        raise Exception("❌ LARK_APP_ID atau LARK_APP_SECRET tidak ada!")
-    get_lark_tenant_token()
+if __name__ == "__main__":
+    main()
