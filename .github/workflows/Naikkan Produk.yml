@@ -30,7 +30,7 @@ jobs:
         run: pip install requests
 
       - name: Run Boost
-        run: python scripts/zeodda_boost.py
+        run: python scripts/Naikkan Produk.py
 
       - name: Notify success
         if: success()
