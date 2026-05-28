@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 # ============================================================
 # CONFIG
 # ============================================================
-SHOPEE_PARTNER_ID    = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
+SHOPEE_PARTNER_ID    = int(os.environ.get("SHOPEE_PARTNER_ID") or "2035358")
 SHOPEE_PARTNER_KEY   = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
 SHOPEE_BASE_URL      = "https://partner.shopeemobile.com"
 LARK_APP_ID          = os.environ.get("LARK_APP_ID", "")
@@ -77,10 +77,13 @@ def refresh_token():
         hashlib.sha256
     ).hexdigest()
     try:
+        # Sub-account: pakai main_account_id bukan shop_id
+        shop_ids_raw = os.environ.get("SHOPEE_SHOP_IDS", "").strip()
+        first_shop   = int(shop_ids_raw.split(",")[0].strip()) if shop_ids_raw else 963980234
         r   = requests.post(
             f"{SHOPEE_BASE_URL}{path}",
             params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
-            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID},
+            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "shop_id": first_shop},
             timeout=30
         )
         res = r.json()
@@ -167,7 +170,20 @@ def group_by_shop(items):
     for item in items:
         fields    = item.get("fields", {})
         shop_raw  = fields.get("Shop ID")
-        shop_id   = int(shop_raw) if shop_raw and str(shop_raw).isdigit() else None
+        # Debug: print raw value untuk lihat format
+        print(f"  DEBUG Shop ID raw: {repr(shop_raw)}")
+        try:
+            if isinstance(shop_raw, (int, float)) and shop_raw:
+                shop_id = int(shop_raw)
+            elif isinstance(shop_raw, str) and shop_raw.strip().isdigit():
+                shop_id = int(shop_raw.strip())
+            elif isinstance(shop_raw, list) and shop_raw:
+                # Lark text field format
+                shop_id = int(str(shop_raw[0].get("text", "")).strip())
+            else:
+                shop_id = None
+        except Exception:
+            shop_id = None
 
         if not shop_id:
             print(f"  ⚠️ Skip record tanpa Shop ID: {item.get('record_id')}")
