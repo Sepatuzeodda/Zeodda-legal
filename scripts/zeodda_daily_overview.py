@@ -225,24 +225,17 @@ def collect_star_ratings():
     print(f"⭐ Ambil rating dari {len(item_ids)} produk...")
 
     for iid in item_ids:
-        page_no = 1
-        while True:
-            resp     = shopee_get("/api/v2/product/get_comment", {
-                "item_id":   iid,
-                "page_size": 100,
-                "page_no":   page_no,
-            })
-            comments = safe_list(resp, "item_comment_list")
-            if not comments:
-                break
-            for c in comments:
-                s = safe_int(c.get("rating_star", 0))
-                if s in stars:
-                    stars[s] += 1
-            # Kalau kurang dari 100, berarti sudah halaman terakhir
-            if len(comments) < 100:
-                break
-            page_no += 1
+        # Page 1 saja (100 review terbaru) — cukup untuk tracking kumulatif harian
+        resp     = shopee_get("/api/v2/product/get_comment", {
+            "item_id":   iid,
+            "page_size": 100,
+            "page_no":   1,
+        })
+        comments = safe_list(resp, "item_comment_list")
+        for c in comments:
+            s = safe_int(c.get("rating_star", 0))
+            if s in stars:
+                stars[s] += 1
 
     print(f"   ⭐5={stars[5]} ⭐4={stars[4]} ⭐3={stars[3]} ⭐2={stars[2]} ⭐1={stars[1]}")
     return stars
@@ -314,7 +307,8 @@ def fetch_all_shopee_data():
                     print(f"   ⏭️  Skip CANCELLED: {sn}")
                     continue
 
-                if total == 0 and status == "UNPAID":
+                if total == 0:
+                    # total_amount belum tersedia (UNPAID atau status lain) — hitung dari item
                     item_sum = sum(
                         safe_float(i.get("model_discounted_price", 0)) *
                         safe_float(i.get("model_quantity_purchased", 1))
@@ -322,7 +316,7 @@ def fetch_all_shopee_data():
                     )
                     omzet_harian += item_sum
                     omzet_gross  += item_sum + ongkir
-                    print(f"   📝 UNPAID {sn}: item_sum={item_sum:.0f}")
+                    print(f"   📝 {status} {sn}: total=0 item_sum={item_sum:.0f} ongkir={ongkir:.0f}")
                 else:
                     omzet_harian += total - ongkir
                     omzet_gross  += total
