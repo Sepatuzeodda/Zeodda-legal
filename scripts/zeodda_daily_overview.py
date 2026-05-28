@@ -163,14 +163,15 @@ def fetch_all_shopee_data():
     yesterday_ms = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
     data = {}
-    data["shop_info"]   = shopee_get("/api/v2/shop/get_shop_info")
-    data["balance"]     = shopee_get("/api/v2/ads/get_total_balance")
-    data["shop_perf"]   = shopee_get("/api/v2/account_health/get_shop_performance")
-    data["penalty"]     = shopee_get("/api/v2/account_health/get_penalty_point_history")
-    data["late_orders"] = shopee_get("/api/v2/account_health/get_late_orders")
-    data["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
     
-    # Ambil seluruh list order yang masuk kemarin (Tanpa filter status agar menangkap data UNPAID)
+    # PERBAIKAN: Mengambil info merchant untuk bypass data scoping follower_count di shop_info
+    data["merchant_info"] = shopee_get("/api/v2/merchant/get_merchant_info")
+    data["balance"]       = shopee_get("/api/v2/ads/get_total_balance")
+    data["shop_perf"]     = shopee_get("/api/v2/account_health/get_shop_performance")
+    data["penalty"]       = shopee_get("/api/v2/account_health/get_penalty_point_history")
+    data["late_orders"]   = shopee_get("/api/v2/account_health/get_late_orders")
+    data["issues"]        = shopee_get("/api/v2/account_health/get_listings_with_issues")
+    
     orders_resp = shopee_get("/api/v2/order/get_order_list", {
         "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100
     })
@@ -210,13 +211,10 @@ def fetch_all_shopee_data():
                 shipping_fee = float(order.get("estimated_shipping_fee", 0))
                 subsidi = float(order.get("seller_absorption_co_sub", 0))
                 
-                # JIKA PESANAN BELUM DIBAYAR (UNPAID): total_amount API bernilai 0.
-                # Kita bypass dengan menghitung harga produk setelah diskon toko langsung dari item_list.
                 if total_amount == 0 and status == "UNPAID":
                     item_list = safe_list(order, "item_list")
                     item_sum = 0
                     for item in item_list:
-                        # item_selling_price adalah harga setelah diskon penjual/toko
                         qty = float(item.get("model_quantity_purchased", 1))
                         price = float(item.get("item_selling_price", 0))
                         item_sum += (price * qty)
@@ -224,7 +222,6 @@ def fetch_all_shopee_data():
                     omzet_harian_tanpa_ongkir += item_sum
                     omzet_gross_plus_ongkir += (item_sum + shipping_fee)
                 else:
-                    # JIKA PESANAN SUDAH DIBAYAR NORMAL
                     omzet_harian_tanpa_ongkir += (total_amount - shipping_fee)
                     omzet_gross_plus_ongkir += total_amount
                 
@@ -239,7 +236,7 @@ def fetch_all_shopee_data():
 def input_daily_overview(d, yesterday_ms):
     shop_perf    = safe_dict(d, "shop_perf")
     overall_perf = safe_dict(shop_perf, "overall_performance")
-    shop_info    = safe_dict(d, "shop_info")
+    merchant_info = safe_dict(d, "merchant_info")
     penalty      = safe_dict(d, "penalty")
     late_orders  = safe_dict(d, "late_orders")
     issues       = safe_dict(d, "issues")
@@ -248,6 +245,14 @@ def input_daily_overview(d, yesterday_ms):
     all_orders       = safe_list(d.get("orders", {}), "order_list")
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
     returns_list     = safe_list(d.get("returns", {}), "return_list")
+
+    # Ambil list shop dari merchant info untuk memetakan follower_count gabungan merchant
+    auth_shops = safe_list(merchant_info, "auth_shops")
+    total_followers = 0
+    for shop in auth_shops:
+        if shop.get("shop_id") == SHOPEE_SHOP_ID:
+            # Jika Shopee melewatkan total_follower di tingkat object toko merchant
+            total_followers = safe_int(shop.get("follower_count", 0))
 
     fields = {
         "Tanggal":                yesterday_ms,
@@ -258,7 +263,7 @@ def input_daily_overview(d, yesterday_ms):
         "Omzet Harian":           d["calculated_omzet_harian"],
         "Omzet Gross":            d["calculated_omzet_gross"],
         "Subsidi MP":             d["calculated_subsidi_mp"],
-        "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
+        "Follower Toko":          total_followers,
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
         "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
