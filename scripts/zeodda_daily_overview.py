@@ -27,7 +27,6 @@ LARK_BASE_URL   = "https://open.larksuite.com"
 TABLE_DAILY_OVERVIEW = "tblSVQG08nHr7tXD"
 TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 
-# Cache token
 _lark_tenant_token = None
 
 # ============================================================
@@ -42,11 +41,6 @@ def safe_int(val):
         return int(float(str(val)))
     except Exception:
         return 0
-
-def safe_str(val):
-    if val is None or isinstance(val, (dict, list)):
-        return ""
-    return str(val)
 
 def safe_dict(d, key):
     if not isinstance(d, dict):
@@ -64,10 +58,9 @@ def safe_list(d, key):
 # SHOPEE TOKEN AUTOMATION & REQUEST HELPERS
 # ============================================================
 def refresh_shopee_access_token():
-    """Otomatis refresh access_token menggunakan refresh_token dari GitHub Secrets"""
     global SHOPEE_ACCESS_TOKEN
     if not SHOPEE_REFRESH_TOKEN:
-        print("⚠️ SHOPEE_REFRESH_TOKEN kosong, mencoba jalan dengan ACCESS_TOKEN yang ada.")
+        print("⚠️ SHOPEE_REFRESH_TOKEN kosong, berjalan dengan ACCESS_TOKEN saat ini.")
         return False
         
     path = "/api/v2/auth/access_token/get"
@@ -148,7 +141,6 @@ def get_lark_headers():
     }
 
 def lark_delete_duplicates(table_id, timestamp_ms, platform_name):
-    """Mencari dan membersihkan data duplikat berdasarkan Tanggal & Platform sebelum insert"""
     search_url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/search"
     payload = {
         "filter": {
@@ -203,55 +195,88 @@ def lark_add_batch(table_id, records_list):
         return {"code": -1}
 
 # ============================================================
-# PULL DATA FROM SHOPEE PRODUCTION (H-1 TIMELINE)
+# PULL & AGGREGATION ENGINE WITH MARKETPLACE SUBSIDY
 # ============================================================
 def fetch_all_shopee_data():
     print("📥 Mengambil semua data Shopee Jalur Production...")
     refresh_shopee_access_token()
     
-    # Konfigurasi penanggalan akurat H-1 (Kemarin penuh)
     yesterday = datetime.now() - timedelta(days=1)
     date_str_yesterday = yesterday.strftime("%Y-%m-%d")
     
     ts_start_yesterday = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-    ts_end_yesterday   = ts_start_yesterday + 86399  # Selesai jam 23:59:59
+    ts_end_yesterday   = ts_start_yesterday + 86399
     
     yesterday_ms = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
     data = {}
     
-    # 1. Endpoint Real-time Toko & Saldo
+    # Ambil metrik operasional toko
     data["shop_info"]   = shopee_get("/api/v2/shop/get_shop_info")
     data["balance"]     = shopee_get("/api/v2/ads/get_total_balance")
-    
-    # FIX ENDPOINT: Menggunakan struktur modul resmi /account_health/ untuk Production
     data["shop_perf"]   = shopee_get("/api/v2/account_health/get_shop_performance")
     data["penalty"]     = shopee_get("/api/v2/account_health/get_penalty_point_history")
     data["late_orders"] = shopee_get("/api/v2/account_health/get_late_orders")
     data["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
     
-    # 2. Data Transaksi Rentang Waktu H-1
-    data["orders"] = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100,
-    })
-    data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
-        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100, "order_status": "CANCELLED",
-    })
-    
-    # FIX ENDPOINT: Jalur resmi penarikan retur v2 menggunakan /returns/
-    data["returns"] = shopee_get("/api/v2/returns/get_return_list", {
-        "page_no": 1, "page_size": 100, "create_time_from": ts_start_yesterday, "create_time_to": ts_end_yesterday,
-    })
-    
-    # 3. Data Finansial Pendapatan & Iklan Kemarin (H-1)
-    data["income"] = shopee_get("/api/v2/payment/get_income_overview", {
-        "start_date": date_str_yesterday, "end_date": date_str_yesterday,
-    })
     data["ads"] = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
         "start_date": date_str_yesterday, "end_date": date_str_yesterday,
     })
     
-    print(f"✅ Seluruh data Shopee Production untuk tanggal {date_str_yesterday} berhasil dikumpulkan.")
+    orders_resp = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100,
+    })
+    data["orders"] = orders_resp
+    
+    cancelled_resp = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100, "order_status": "CANCELLED",
+    })
+    data["cancelled_orders"] = cancelled_resp
+
+    data["returns"] = shopee_get("/api/v2/returns/get_return_list", {
+        "page_no": 1, "page_size": 100, "create_time_from": ts_start_yesterday, "create_time_to": ts_end_yesterday,
+    })
+    
+    # Variables kalkulasi murni
+    omzet_harian_tanpa_ongkir = 0
+    omzet_gross_plus_ongkir = 0
+    total_subsidi_shopee_hari_ini = 0
+    
+    order_list = safe_list(orders_resp, "order_list")
+    if order_list:
+        order_sn_list = [o.get("order_sn") for o in order_list if o.get("order_sn")]
+        
+        for i in range(0, len(order_sn_list), 50):
+            batch_sn = order_sn_list[i:i+50]
+            sn_string = ",".join(batch_sn)
+            
+            # UPDATE: Menambahkan field seller_absorption_co_sub ke field opsional detail order
+            detail_resp = shopee_get("/api/v2/order/get_order_detail", {
+                "order_sn_list": sn_string,
+                "response_optional_fields": "total_amount,estimated_shipping_fee,order_status,seller_absorption_co_sub"
+            })
+            
+            items_detail = safe_list(detail_resp, "order_list")
+            for order in items_detail:
+                status = order.get("order_status", "")
+                if status == "CANCELLED":
+                    continue
+                    
+                total_amount = float(order.get("total_amount", 0))
+                shipping_fee = float(order.get("estimated_shipping_fee", 0))
+                
+                # seller_absorption_co_sub mengembalikan nilai koin/voucher subsidi koin gratis ongkir dari pihak Shopee
+                subsidi_per_order = float(order.get("seller_absorption_co_sub", 0))
+                
+                omzet_harian_tanpa_ongkir += (total_amount - shipping_fee)
+                omzet_gross_plus_ongkir += total_amount
+                total_subsidi_shopee_hari_ini += subsidi_per_order
+
+    data["calculated_omzet_harian"] = safe_int(omzet_harian_tanpa_ongkir)
+    data["calculated_omzet_gross"] = safe_int(omzet_gross_plus_ongkir)
+    data["calculated_subsidi_mp"] = safe_int(total_subsidi_shopee_hari_ini)
+    
+    print(f"📊 Hasil Kalkulasi [{date_str_yesterday}] -> Omzet Harian: Rp {data['calculated_omzet_harian']:,} | Omzet Gross: Rp {data['calculated_omzet_gross']:,} | Subsidi MP: Rp {data['calculated_subsidi_mp']:,}")
     return data, yesterday_ms
 
 # ============================================================
@@ -262,7 +287,6 @@ def input_daily_overview(d, yesterday_ms):
     
     shop_perf    = safe_dict(d, "shop_perf")
     overall_perf = safe_dict(shop_perf, "overall_performance")
-    income       = safe_dict(d, "income")
     shop_info    = safe_dict(d, "shop_info")
     penalty      = safe_dict(d, "penalty")
     late_orders  = safe_dict(d, "late_orders")
@@ -273,15 +297,15 @@ def input_daily_overview(d, yesterday_ms):
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
     returns_list     = safe_list(d.get("returns", {}), "return_list")
 
-    # Mapping aman agar tipe ribuan koma (,) Excel Lark Base terproses sebagai angka murni
     fields = {
         "Tanggal":                yesterday_ms,
         "Platform":               "Shopee",
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
         "Total Retur":            safe_int(len(returns_list)),
-        "Omzet Harian":           safe_int((income.get("total_income") or {}).get("released_amount", 0)),
-        "Omzet Gross":            safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Omzet Harian":           d["calculated_omzet_harian"],
+        "Omzet Gross":            d["calculated_omzet_gross"],
+        "Subsidi MP":             d["calculated_subsidi_mp"], # INJEKSI: Push data baru Subsidi MP ke Lark Base
         "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
@@ -297,7 +321,6 @@ def input_daily_overview(d, yesterday_ms):
 def input_alerts(d, yesterday_ms):
     print("🚨 Memeriksa ambang batas anomali untuk pembuatan Alert Log...")
     balance  = safe_dict(d, "balance")
-    income   = safe_dict(d, "income")
     alerts   = []
 
     saldo = safe_int(balance.get("total_balance", 0))
@@ -310,14 +333,14 @@ def input_alerts(d, yesterday_ms):
             "Prioritas": "High", "Status": "Open",
         })
 
-    omzet_gross = safe_int((income.get("total_income") or {}).get("released_amount", 0))
+    omzet_gross = d["calculated_omzet_gross"]
     all_orders = safe_list(d.get("orders", {}), "order_list")
     
     if len(all_orders) > 0 and omzet_gross == 0:
         alerts.append({
             "Tanggal": yesterday_ms, "Platform": "Shopee",
             "Tipe Alert": "Omzet Gross 0",
-            "Detail": f"Ada {len(all_orders)} order masuk kemarin, tapi omzet gross tercatat 0. Periksa status pelepasan dana API.",
+            "Detail": f"Ada {len(all_orders)} order masuk kemarin, tetapi kalkulasi total_amount order menghasilkan 0.",
             "Nilai Saat Ini": 0, "Nilai Normal": 1,
             "Prioritas": "High", "Status": "Open",
         })
@@ -339,13 +362,10 @@ def main():
     if not LARK_APP_ID or not LARK_APP_SECRET:
         raise Exception("❌ Environment Variable LARK_APP_ID atau LARK_APP_SECRET belum dikonfigurasi!")
         
-    # Inisialisasi token Lark Base
     get_lark_tenant_token()
 
-    # Eksekusi proses penarikan data produksi Shopee
     shopee_data, target_date_ms = fetch_all_shopee_data()
 
-    # Push data bersih ke Lark Base
     input_daily_overview(shopee_data, target_date_ms)
     input_alerts(shopee_data, target_date_ms)
 
