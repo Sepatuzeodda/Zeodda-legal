@@ -1,7 +1,7 @@
 """
 scripts/zeodda_daily_overview.py
 Daily Overview — pull data dari Shopee & push ke Lark Base.
-Revisi Final: Menjamin konversi angka milidetik UNIX untuk mencegah error DatetimeFieldConvFail.
+Revisi: Perbaikan tipe data field pada alert (NumberFieldConvFail).
 """
 
 import sys
@@ -15,14 +15,14 @@ from zeodda_helpers import *
 PLATFORM = "Shopee"
 
 def push_alert(date_ms, tipe, detail, nilai_saat_ini, nilai_normal, prioritas="Medium"):
-    # Gunakan integer milidetik untuk validasi tipe Date di tabel Lark
+    # Kolom Nilai di Lark diset sebagai tipe Number, wajib dikirim berupa angka integer murni
     payload = {
         "Tanggal":        int(date_ms), 
         "Platform":       PLATFORM,
         "Tipe Alert":     tipe,
         "Detail":         detail,
-        "Nilai Saat Ini": str(nilai_saat_ini),
-        "Nilai Normal":   str(nilai_normal),
+        "Nilai Saat Ini": int(nilai_saat_ini),
+        "Nilai Normal":   int(nilai_normal),
         "Prioritas":      prioritas,
         "Status":         "Open",
     }
@@ -100,7 +100,6 @@ def collect(d):
     return d
 
 def push_to_lark(d):
-    # Solusi Kunci DatetimeFieldConvFail: Paksa casting data Tanggal ke tipe Integer milidetik
     record = {
         "Tanggal":                int(d["yesterday_ms"]),
         "Platform":               PLATFORM,
@@ -124,17 +123,17 @@ def check_alerts(d):
     date_ms = d["yesterday_ms"]
     alerts = []
     if d["poin_penalti"] >= 5:
-        alerts.append(("Penalti Tinggi", f"Poin penalti mencapai {d['poin_penalti']}", d["poin_penalti"], "< 5", "High"))
+        alerts.append(("Penalti Tinggi", f"Poin penalti mencapai {d['poin_penalti']}", d["poin_penalti"], 0, "High"))
     if d["order_terlambat"] > 0:
-        alerts.append(("Order Terlambat", f"{d['order_terlambat']} order terlambat kemarin", d["order_terlambat"], "0", "High"))
+        alerts.append(("Order Terlambat", f"{d['order_terlambat']} order terlambat kemarin", d["order_terlambat"], 0, "High"))
     if d["produk_bermasalah"] > 0:
-        alerts.append(("Produk Bermasalah", f"{d['produk_bermasalah']} produk butuh perhatian", d["produk_bermasalah"], "0", "Medium"))
+        alerts.append(("Produk Bermasalah", f"{d['produk_bermasalah']} produk butuh perhatian", d["produk_bermasalah"], 0, "Medium"))
     if d["saldo_iklan"] < 100_000:
-        alerts.append(("Saldo Iklan Rendah", f"Saldo iklan Rp {d['saldo_iklan']:,.0f}", d["saldo_iklan"], ">= 100.000", "High"))
+        alerts.append(("Saldo Iklan Rendah", f"Saldo iklan Rp {d['saldo_iklan']:,.0f}", d["saldo_iklan"], 100000, "High"))
     if d["total_retur"] > 3:
-        alerts.append(("Retur Tinggi", f"{d['total_retur']} retur kemarin", d["total_retur"], "<= 3", "Medium"))
+        alerts.append(("Retur Tinggi", f"{d['total_retur']} retur kemarin", d["total_retur"], 3, "Medium"))
     if d["omzet_gross"] == 0 and d["total_order_masuk"] > 0:
-        alerts.append(("Omzet Gross 0", "Ada order tapi omzet gross = 0, cek API", 0, "> 0", "High"))
+        alerts.append(("Omzet Gross 0", "Ada order tapi omzet gross = 0, cek API", 0, 1, "High"))
 
     for tipe, detail, nilai, normal, prioritas in alerts:
         push_alert(date_ms, tipe, detail, nilai, normal, prioritas)
