@@ -24,7 +24,7 @@ _GLOBAL_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
 _lark_token          = None
 
 # ============================================================
-# GITHUB SECRET SAVE
+# GITHUB SECRET SAVE (MENGGUNAKAN GH_PAT)
 # ============================================================
 def save_secret_to_github(name, value):
     if not GH_PAT or not GH_REPO:
@@ -52,18 +52,17 @@ def save_secret_to_github(name, value):
             timeout=10
         )
         if r2.status_code in (201, 204):
-            print(f"  ✅ Secret {name} berhasil diperbarui di GitHub")
+            print(f"  ✅ Secret {name} berhasil diperbarui di GitHub via GH_PAT")
         else:
             print(f"  ❌ Gagal simpan {name}: {r2.status_code}")
     except Exception as e:
         print(f"  ⚠️ save_secret error: {e}")
 
 # ============================================================
-# SHOPEE TOKEN AUTOMATION (OFFICIAL REFRESH PATH V2)
+# SHOPEE TOKEN AUTOMATION (FIXED PUBLIC PATH V2)
 # ============================================================
 def get_active_token_for_shop(shop_id):
-    """Menghasilkan Access Token segar menggunakan jalur resmi /auth/refresh_access_token"""
-    # Mengambil token spesifik milik toko cabang dari env jika ada
+    """Menghasilkan Access Token menggunakan jalur resmi /public/refresh_access_token"""
     env_key = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
     local_refresh = os.environ.get(env_key, "").strip() or _GLOBAL_REFRESH_TOKEN
     
@@ -71,10 +70,10 @@ def get_active_token_for_shop(shop_id):
         print(f"  ❌ Gagal: Tidak ada REFRESH_TOKEN untuk Toko {shop_id}")
         return None
         
-    path = "/api/v2/auth/refresh_access_token"
+    # FIX: Mengubah jalur modul endpoint ke kelompok Public resmi Shopee Production
+    path = "/api/v2/public/refresh_access_token"
     ts   = int(time.time())
     
-    # Perbaikan rumus sign resmi Shopee v2 untuk refresh token
     base_string = f"{SHOPEE_PARTNER_ID}{path}{ts}"
     sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
     
@@ -94,9 +93,8 @@ def get_active_token_for_shop(shop_id):
         if "access_token" in res and res["access_token"]:
             new_refresh = res.get("refresh_token", "")
             if new_refresh and new_refresh != local_refresh:
-                # Simpan kembali rotasi token baru ke tempat asalnya
                 secret_target_name = env_key if os.environ.get(env_key) else "SHOPEE_REFRESH_TOKEN"
-                print(f"  🔑 Rotasi otomatis berhasil, menyimpan token baru ke {secret_target_name}...")
+                print(f"  🔑 Rotasi otomatis berhasil, memperbarui token baru ke {secret_target_name}...")
                 save_secret_to_github(secret_target_name, new_refresh)
             return res["access_token"]
         else:
