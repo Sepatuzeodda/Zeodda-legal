@@ -20,8 +20,8 @@ GH_PAT               = os.environ.get("GH_PAT", "").strip()
 GH_REPO              = os.environ.get("GH_REPO", "").strip()
 MAX_BOOST            = 5
 
-_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
-_lark_token    = None
+_GLOBAL_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
+_lark_token          = None
 
 # ============================================================
 # GITHUB SECRET SAVE
@@ -52,28 +52,34 @@ def save_secret_to_github(name, value):
             timeout=10
         )
         if r2.status_code in (201, 204):
-            print(f"  ✅ Secret {name} tersimpan ke GitHub")
+            print(f"  ✅ Secret {name} berhasil diperbarui di GitHub")
         else:
             print(f"  ❌ Gagal simpan {name}: {r2.status_code}")
     except Exception as e:
         print(f"  ⚠️ save_secret error: {e}")
 
 # ============================================================
-# SHOPEE TOKEN AUTOMATION (INDIVIDUAL SHOP REFRESH ENGINE)
+# SHOPEE TOKEN AUTOMATION (OFFICIAL REFRESH PATH V2)
 # ============================================================
 def get_active_token_for_shop(shop_id):
-    """Mendapatkan access token segar khusus untuk target shop_id terkait"""
-    global _REFRESH_TOKEN
-    path = "/api/v2/auth/access_token/get"
+    """Menghasilkan Access Token segar menggunakan jalur resmi /auth/refresh_access_token"""
+    # Mengambil token spesifik milik toko cabang dari env jika ada
+    env_key = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
+    local_refresh = os.environ.get(env_key, "").strip() or _GLOBAL_REFRESH_TOKEN
+    
+    if not local_refresh:
+        print(f"  ❌ Gagal: Tidak ada REFRESH_TOKEN untuk Toko {shop_id}")
+        return None
+        
+    path = "/api/v2/auth/refresh_access_token"
     ts   = int(time.time())
-    sign = hmac.new(
-        SHOPEE_PARTNER_KEY.encode(),
-        f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
-        hashlib.sha256
-    ).hexdigest()
+    
+    # Perbaikan rumus sign resmi Shopee v2 untuk refresh token
+    base_string = f"{SHOPEE_PARTNER_ID}{path}{ts}"
+    sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
     
     payload = {
-        "refresh_token": _REFRESH_TOKEN,
+        "refresh_token": local_refresh,
         "partner_id": SHOPEE_PARTNER_ID,
         "shop_id": int(shop_id)
     }
@@ -86,20 +92,18 @@ def get_active_token_for_shop(shop_id):
         )
         res = r.json()
         if "access_token" in res and res["access_token"]:
-            # Simpan refresh token baru jika Shopee melakukan rotasi
             new_refresh = res.get("refresh_token", "")
-            if new_refresh and new_refresh != _REFRESH_TOKEN:
-                _REFRESH_TOKEN = new_refresh
-                print(f"  🔑 Terdeteksi rotasi token baru, memperbarui GitHub Secrets...")
-                save_secret_to_github("SHOPEE_REFRESH_TOKEN", new_refresh)
-            
-            # Kembalikan access token murni toko terkait
+            if new_refresh and new_refresh != local_refresh:
+                # Simpan kembali rotasi token baru ke tempat asalnya
+                secret_target_name = env_key if os.environ.get(env_key) else "SHOPEE_REFRESH_TOKEN"
+                print(f"  🔑 Rotasi otomatis berhasil, menyimpan token baru ke {secret_target_name}...")
+                save_secret_to_github(secret_target_name, new_refresh)
             return res["access_token"]
         else:
-            print(f"  ❌ Gagal pembuatan token untuk Toko {shop_id}: {res.get('error')} - {res.get('message')}")
+            print(f"  ❌ Penolakan Otorisasi Toko {shop_id}: {res.get('error')} - {res.get('message')}")
             return None
     except Exception as e:
-        print(f"  ❌ Error request token Toko {shop_id}: {e}")
+        print(f"  ❌ Request token error Toko {shop_id}: {e}")
         return None
 
 def shopee_post(path, payload, shop_id, access_token):
@@ -217,15 +221,14 @@ def update_boost_timestamp(record_id):
         print(f"  ❌ Update timestamp gagal: {result.get('code')} {result.get('msg')}")
 
 # ============================================================
-# BOOST EXECUTION
+# CORE MOVEMENT
 # ============================================================
 def boost_for_shop(shop_id, items):
     print(f"\n🏪 Toko {shop_id} — {len(items)} produk aktif")
 
-    # Minta token segar khusus untuk toko ini secara mandiri
     shop_access_token = get_active_token_for_shop(shop_id)
     if not shop_access_token:
-        print(f"  ❌ Skip toko {shop_id} — Gagal inisialisasi token.")
+        print(f"  ❌ Skip toko {shop_id} — Token otentikasi tidak valid.")
         return 0
 
     sorted_items = sort_candidates(items)
@@ -259,11 +262,11 @@ def boost_for_shop(shop_id, items):
         print(f"  ⚠️ Tidak ada item valid untuk toko {shop_id}")
         return 0
 
-    print(f"  📤 Menjalankan Boost {len(item_ids)} produk via Token Spesifik Toko...")
+    print(f"  📤 Menjalankan Boost {len(item_ids)} produk via Jalur Token Resmi...")
     raw_res = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_access_token)
     
     if not raw_res:
-        print(f"  ❌ Gagal total eksekusi API untuk Toko {shop_id}. Lewati proses data.")
+        print(f"  ❌ Gagal total eksekusi API untuk Toko {shop_id}.")
         return 0
         
     resp_payload = raw_res.get("response", {})
@@ -290,17 +293,13 @@ def safe_list(d, key):
     return v if isinstance(v, list) else []
 
 # ============================================================
-# MAIN ORCHESTRATOR
+# MAIN
 # ============================================================
 def main():
     print("=" * 50)
     print("🚀 Naikkan Produk — START")
     print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 50)
-
-    if not _REFRESH_TOKEN:
-        print("❌ ABORTED: Environment Variable SHOPEE_REFRESH_TOKEN kosong!")
-        return
 
     if not LARK_APP_ID or not LARK_APP_SECRET:
         print("❌ LARK credentials tidak ada!")
