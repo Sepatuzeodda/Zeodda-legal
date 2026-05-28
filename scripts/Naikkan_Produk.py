@@ -101,18 +101,48 @@ def refresh_token():
     except Exception as e:
         print(f"❌ Refresh error: {e}")
 
+def get_shop_token(shop_id):
+    """Tukar main access token ke shop-specific token."""
+    path = "/api/v2/auth/access_token/get"
+    ts   = int(time.time())
+    sign = hmac.new(
+        SHOPEE_PARTNER_KEY.encode(),
+        f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
+        hashlib.sha256
+    ).hexdigest()
+    try:
+        r   = requests.post(
+            f"{SHOPEE_BASE_URL}{path}",
+            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
+            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "shop_id": shop_id},
+            timeout=30
+        )
+        res = r.json()
+        if "access_token" in res and res["access_token"]:
+            print(f"  🔑 Shop token OK untuk toko {shop_id}")
+            return res["access_token"]
+        else:
+            print(f"  ❌ Gagal get shop token {shop_id}: {res.get('error')} {res.get('message')}")
+            return None
+    except Exception as e:
+        print(f"  ❌ get_shop_token error: {e}")
+        return None
+
 def shopee_sign(path, ts, shop_id):
     base = f"{SHOPEE_PARTNER_ID}{path}{ts}{_ACCESS_TOKEN}{shop_id}"
     return hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
 
-def shopee_post(path, payload, shop_id):
-    ts = int(time.time())
+def shopee_post(path, payload, shop_id, shop_token=None):
+    ts    = int(time.time())
+    token = shop_token if shop_token else _ACCESS_TOKEN
+    base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{token}{shop_id}"
+    sign  = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
     params = {
         "partner_id":   SHOPEE_PARTNER_ID,
         "timestamp":    ts,
-        "access_token": _ACCESS_TOKEN,
+        "access_token": token,
         "shop_id":      shop_id,
-        "sign":         shopee_sign(path, ts, shop_id),
+        "sign":         sign,
     }
     try:
         r    = requests.post(f"{SHOPEE_BASE_URL}{path}", params=params, json=payload, timeout=30)
