@@ -227,7 +227,7 @@ def collect_star_ratings():
     for iid in item_ids:
         page_no = 1
         while True:
-            resp     = shopee_get("/api/v2/item/get_comment", {
+            resp     = shopee_get("/api/v2/product/get_comment", {
                 "item_id":   iid,
                 "page_size": 100,
                 "page_no":   page_no,
