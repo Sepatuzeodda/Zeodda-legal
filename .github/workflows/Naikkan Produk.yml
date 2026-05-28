@@ -1,45 +1,112 @@
-name: Naikkan Produk Otomatis
-on:
-  schedule:
-    - cron: '0 */4 * * *'  # Setiap 4 jam
-  workflow_dispatch:
+import hmac
+import hashlib
+import time
+import requests
+import os
+from datetime import datetime, timezone
 
-jobs:
-  run-boost:
-    runs-on: ubuntu-latest
-    env:
-      SHOPEE_PARTNER_ID:     ${{ secrets.SHOPEE_PARTNER_ID }}
-      SHOPEE_PARTNER_KEY:    ${{ secrets.SHOPEE_PARTNER_KEY }}
-      SHOPEE_SHOP_IDS:       ${{ secrets.SHOPEE_SHOP_IDS }}
-      SHOPEE_ACCESS_TOKEN:   ${{ secrets.SHOPEE_ACCESS_TOKEN }}
-      SHOPEE_REFRESH_TOKEN:  ${{ secrets.SHOPEE_REFRESH_TOKEN }}
-      # Injeksi rahasia token khusus masing-masing toko cabang
-      SHOPEE_REFRESH_TOKEN_981846983: ${{ secrets.SHOPEE_REFRESH_TOKEN_981846983 }}
-      SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
-      LARK_APP_ID:           ${{ secrets.LARK_APP_ID }}
-      LARK_APP_SECRET:       ${{ secrets.LARK_APP_SECRET }}
-      GH_PAT:                ${{ secrets.GH_PAT }}
-      GH_REPO:               ${{ github.repository }}
+# ============================================================
+# CONFIG
+# ============================================================
+SHOPEE_PARTNER_ID    = int(os.environ.get("SHOPEE_PARTNER_ID") or "2035358")
+SHOPEE_PARTNER_KEY   = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
+SHOPEE_BASE_URL      = "https://partner.shopeemobile.com"
+LARK_APP_ID          = os.environ.get("LARK_APP_ID", "")
+LARK_APP_SECRET      = os.environ.get("LARK_APP_SECRET", "")
+LARK_APP_TOKEN       = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
+LARK_BASE_URL        = "https://open.larksuite.com"
+TABLE_BOOST          = "tblzcjLMZX2KZ4aW"
+GH_PAT               = os.environ.get("GH_PAT", "").strip()
+GH_REPO              = os.environ.get("GH_REPO", "").strip()
+MAX_BOOST            = 5
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+_GLOBAL_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
+_lark_token          = None
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+# ============================================================
+# GITHUB SECRET SAVE (MENGGUNAKAN GH_PAT)
+# ============================================================
+def save_secret_to_github(name, value):
+    if not GH_PAT or not GH_REPO:
+        return
+    try:
+        from nacl import encoding, public
+        import base64
 
-      - name: Install dependencies
-        run: pip install requests PyNaCl
+        r = requests.get(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/public-key",
+            headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
+            timeout=10
+        )
+        data    = r.json()
+        key_id  = data["key_id"]
+        pub_key = data["key"]
 
-      - name: Run Boost
-        run: python scripts/Naikkan_Produk.py
+        pk        = public.PublicKey(pub_key.encode(), encoding.Base64Encoder())
+        encrypted = base64.b64encode(public.SealedBox(pk).encrypt(value.encode())).decode()
 
-      - name: Notify success
-        if: success()
-        run: echo "✅ Boost selesai pada $(date)"
+        r2 = requests.put(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/{name}",
+            headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
+            json={"encrypted_value": encrypted, "key_id": key_id},
+            timeout=10
+        )
+        if r2.status_code in (201, 204):
+            print(f"  ✅ Secret {name} berhasil diperbarui di GitHub via GH_PAT")
+        else:
+            print(f"  ❌ Gagal simpan {name}: {r2.status_code}")
+    except Exception as e:
+        print(f"  ⚠️ save_secret error: {e}")
 
-      - name: Notify failure
-        if: failure()
-        run: echo "❌ Boost gagal pada $(date)"
+# ============================================================
+# SHOPEE TOKEN AUTOMATION (CORRECT PRODUCTION PATH)
+# ============================================================
+def get_active_token_for_shop(shop_id):
+    """Menghasilkan Access Token menggunakan jalur resmi Shopee v2"""
+    env_key = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
+    local_refresh = os.environ.get(env_key, "").strip() or _GLOBAL_REFRESH_TOKEN
+    
+    if not local_refresh:
+        print(f"  ❌ Gagal: Tidak ada REFRESH_TOKEN untuk Toko {shop_id}")
+        return None
+        
+    # KOREKSI FIX: Jalur endpoint resmi Shopee v2 untuk refresh token tetap di /auth/access_token/get
+    path = "/api/v2/auth/access_token/get"
+    ts   = int(time.time())
+    
+    base_string = f"{SHOPEE_PARTNER_ID}{path}{ts}"
+    sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
+    
+    payload = {
+        "refresh_token": local_refresh,
+        "partner_id": SHOPEE_PARTNER_ID,
+        "shop_id": int(shop_id)
+    }
+    try:
+        r = requests.post(
+            f"{SHOPEE_BASE_URL}{path}",
+            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
+            json=payload,
+            timeout=30
+        )
+        res = r.json()
+        if "access_token" in res and res["access_token"]:
+            new_refresh = res.get("refresh_token", "")
+            if new_refresh and new_refresh != local_refresh:
+                secret_target_name = env_key if os.environ.get(env_key) else "SHOPEE_REFRESH_TOKEN"
+                print(f"  🔑 Rotasi otomatis berhasil, memperbarui token baru ke {secret_target_name}...")
+                save_secret_to_github(secret_target_name, new_refresh)
+            return res["access_token"]
+        else:
+            print(f"  ❌ Penolakan Otorisasi Toko {shop_id}: {res.get('error')} - {res.get('message')}")
+            return None
+    except Exception as e:
+        print(f"  ❌ Request token error Toko {shop_id}: {e}")
+        return None
+
+def shopee_post(path, payload, shop_id, access_token):
+    ts    = int(time.time())
+    base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{access_token}{shop_id}"
+    sign  = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
+    params = {
+        "partner_id":   SHO
