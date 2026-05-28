@@ -234,7 +234,12 @@ def main():
     for c in to_boost:
         fields    = c.get("fields", {})
         record_id = c.get("record_id")
-        kode      = str(fields.get("Kode Produk", "")).strip()
+        # Lark Text field return list of dict: [{'text': '...', 'type': 'text'}]
+        kode_raw  = fields.get("Kode Produk", "")
+        if isinstance(kode_raw, list) and kode_raw:
+            kode = str(kode_raw[0].get("text", "")).strip()
+        else:
+            kode = str(kode_raw).strip()
         prioritas = fields.get("Prioritas", "-")
         last_boost = fields.get("Terakhir Di-Boost", "belum pernah")
 
