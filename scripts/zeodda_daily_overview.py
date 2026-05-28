@@ -202,7 +202,10 @@ def lark_add(table_id, fields, date_str):
 # COLLECT RATING BINTANG TOKO (agregat semua produk)
 # ============================================================
 def collect_star_ratings():
-    """Loop semua produk → get_comment → jumlahkan bintang 1-5."""
+    """
+    Pakai get_item_extra_info — 1 batch request untuk semua produk.
+    Return: rating_star rata-rata toko, comment_count total, stars dict (semua 0 — tidak tersedia di API)
+    """
     stars = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
 
     # Ambil semua item_id aktif
@@ -222,29 +225,33 @@ def collect_star_ratings():
             break
         offset += 100
 
-    print(f"Rating dari {len(item_ids)} produk...")
+    if not item_ids:
+        return stars, 0, 0
 
-    for iid in item_ids:
-        # 1 request per produk — pakai field summary agregat, bukan loop semua comment
-        resp = shopee_get("/api/v2/product/get_comment", {
-            "item_id":   iid,
-            "page_size": 1,
-            "page_no":   1,
+    print(f"Rating dari {len(item_ids)} produk via get_item_extra_info...")
+
+    total_rating_sum   = 0.0
+    total_comment      = 0
+    rated_product_count = 0
+
+    # Batch request — max 50 per call
+    for i in range(0, len(item_ids), 50):
+        chunk = item_ids[i:i+50]
+        resp  = shopee_get("/api/v2/product/get_item_extra_info", {
+            "item_id_list": ",".join(str(x) for x in chunk),
         })
-        # item_rating_summary: {"rating_1": x, ..., "rating_5": x}
-        rating_summary = resp.get("item_rating_summary") or {}
-        if rating_summary:
-            for i in range(1, 6):
-                stars[i] += safe_int(rating_summary.get(f"rating_{i}", 0))
-        else:
-            # Fallback: rating_total = [count_1, count_2, ..., count_5]
-            rating_total = resp.get("rating_total") or []
-            if isinstance(rating_total, list) and len(rating_total) >= 5:
-                for i, count in enumerate(rating_total[:5], start=1):
-                    stars[i] += safe_int(count)
+        for item in safe_list(resp, "item_list"):
+            r = safe_float(item.get("rating_star", 0))
+            c = safe_int(item.get("comment_count", 0))
+            total_comment += c
+            if r > 0:
+                total_rating_sum   += r
+                rated_product_count += 1
 
-    print(f"   stars={stars}")
-    return stars
+    avg_rating = round(total_rating_sum / rated_product_count, 2) if rated_product_count > 0 else 0
+    print(f"   Rating rata-rata toko: {avg_rating} | Total review: {total_comment}")
+
+    return stars, avg_rating, total_comment
 
 # ============================================================
 # MAIN PIPELINE
@@ -349,7 +356,7 @@ def fetch_all_shopee_data():
     data["subsidi_mp"]   = safe_int(total_subsidi)
 
     # ── Rating Bintang ────────────────────────────────────────
-    data["stars"] = collect_star_ratings()
+    data["stars"], data["avg_rating"], data["total_comment"] = collect_star_ratings()
 
     return data
 
@@ -362,6 +369,8 @@ def input_daily_overview(d):
     issues       = safe_dict(d, "issues")
     balance      = safe_dict(d, "balance")
     stars        = d.get("stars", {1:0,2:0,3:0,4:0,5:0})
+    avg_rating   = d.get("avg_rating", 0)
+    total_comment = d.get("total_comment", 0)
 
     all_orders       = safe_list(d.get("orders", {}), "order_list")
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
@@ -376,7 +385,6 @@ def input_daily_overview(d):
         "Omzet Harian":           d["omzet_harian"],
         "Omzet Gross":            d["omzet_gross"],
         "Subsidi MP":             d["subsidi_mp"],
-        "Follower Toko":          0,
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
         "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
@@ -387,6 +395,8 @@ def input_daily_overview(d):
         "Bintang 3":              stars[3],
         "Bintang 2":              stars[2],
         "Bintang 1":              stars[1],
+        "Rating Toko":            avg_rating,
+        "Total Review":           total_comment,
     }
 
     print(f"\n📊 Fields yang akan di-push:")
