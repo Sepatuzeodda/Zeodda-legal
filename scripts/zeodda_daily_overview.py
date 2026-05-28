@@ -1,172 +1,357 @@
-"""
-scripts/zeodda_daily_overview.py
-Daily Overview — pull data dari Shopee & push ke Lark Base.
-Revisi: Perbaikan tipe data field pada alert (NumberFieldConvFail).
-"""
-
-import sys
+import hmac
+import hashlib
+import time
+import requests
 import os
-import traceback
+from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(__file__))
+# ============================================================
+# CONFIG - SHOPEE PRODUCTION
+# ============================================================
+SHOPEE_PARTNER_ID   = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
+SHOPEE_PARTNER_KEY  = os.environ.get("SHOPEE_PARTNER_KEY", "")
+SHOPEE_SHOP_ID      = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
+SHOPEE_ACCESS_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "")
+SHOPEE_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "")
+SHOPEE_BASE_URL     = "https://partner.shopeemobile.com"
 
-from zeodda_helpers import *
+# ============================================================
+# CONFIG - LARK BASE
+# ============================================================
+LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
+LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
+LARK_APP_TOKEN  = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
+LARK_BASE_URL   = "https://open.larksuite.com"
 
-PLATFORM = "Shopee"
+# Lark Table IDs
+TABLE_DAILY_OVERVIEW = "tblSVQG08nHr7tXD"
+TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 
-def push_alert(date_ms, tipe, detail, nilai_saat_ini, nilai_normal, prioritas="Medium"):
-    # Kolom Nilai di Lark diset sebagai tipe Number, wajib dikirim berupa angka integer murni
+# Cache token
+_lark_tenant_token = None
+
+# ============================================================
+# SAFE TYPE HELPERS
+# ============================================================
+def safe_int(val):
+    if val is None:
+        return 0
+    if isinstance(val, (dict, list)):
+        return 0
+    try:
+        return int(float(str(val)))
+    except Exception:
+        return 0
+
+def safe_str(val):
+    if val is None or isinstance(val, (dict, list)):
+        return ""
+    return str(val)
+
+def safe_dict(d, key):
+    if not isinstance(d, dict):
+        return {}
+    v = d.get(key, {})
+    return v if isinstance(v, dict) else {}
+
+def safe_list(d, key):
+    if not isinstance(d, dict):
+        return []
+    v = d.get(key, [])
+    return v if isinstance(v, list) else []
+
+# ============================================================
+# SHOPEE TOKEN AUTOMATION & REQUEST HELPERS
+# ============================================================
+def refresh_shopee_access_token():
+    """Otomatis refresh access_token menggunakan refresh_token dari GitHub Secrets"""
+    global SHOPEE_ACCESS_TOKEN
+    if not SHOPEE_REFRESH_TOKEN:
+        print("⚠️ SHOPEE_REFRESH_TOKEN kosong, mencoba jalan dengan ACCESS_TOKEN yang ada.")
+        return False
+        
+    path = "/api/v2/auth/access_token/get"
+    ts = int(time.time())
+    base_string = f"{str(SHOPEE_PARTNER_ID)}{path}{str(ts)}"
+    sign = hmac.new(SHOPEE_PARTNER_KEY.encode('utf-8'), base_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    
+    url = f"{SHOPEE_BASE_URL}{path}"
+    params = {"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign}
     payload = {
-        "Tanggal":        int(date_ms), 
-        "Platform":       PLATFORM,
-        "Tipe Alert":     tipe,
-        "Detail":         detail,
-        "Nilai Saat Ini": int(nilai_saat_ini),
-        "Nilai Normal":   int(nilai_normal),
-        "Prioritas":      prioritas,
-        "Status":         "Open",
+        "refresh_token": SHOPEE_REFRESH_TOKEN.strip(),
+        "partner_id": SHOPEE_PARTNER_ID,
+        "shop_id": SHOPEE_SHOP_ID
     }
-    print(f"🤖 [DEBUG ALERT] Mencoba push alert ke Lark: {payload}")
-    res = lark_add(TABLE_ALERT_LOG, payload)
-    print(f"🤖 [DEBUG ALERT] Respon Lark: {res}")
-
-def collect(d):
-    """Kumpulkan semua data dari Shopee API ke dict d."""
-    ts_start = d["ts_start"]
-    ts_end   = d["ts_end"]
-    date_dmy = d["date_str_dmy"]
-
-    # 1. Shop Performance
-    perf = shopee_get("/api/v2/seller_data/get_shop_performance", {})
-    d["skor_performa"]   = safe_int(perf.get("overall_rating"))
-    d["rating_toko"]     = perf.get("overall_rating")
-
-    # 2. Penalty Points
-    penalty = shopee_get("/api/v2/seller_data/get_penalty_point_history", {"page_size": 100, "page_no": 1})
-    d["poin_penalti"] = safe_int(penalty.get("total_penalty_points"))
-
-    # 3. Late Orders
-    late = shopee_get("/api/v2/seller_data/get_late_orders", {"page_size": 100, "page_no": 1, "create_time_from": ts_start, "create_time_to": ts_end})
-    d["order_terlambat"] = safe_int(late.get("total_late_orders"))
-
-    # 4. Listings with Issues
-    issues = shopee_get("/api/v2/product/get_listings_with_issues", {"page_size": 100, "page_no": 1})
-    d["produk_bermasalah"] = safe_int(issues.get("total_issues"))
-
-    # 5. Ads Balance
-    balance = shopee_get("/api/v2/ads/get_total_balance", {})
-    d["saldo_iklan"] = safe_int(balance.get("total_balance"))
-
-    # 6. Orders
-    order_resp = shopee_get("/api/v2/order/get_order_list", {"time_range_field": "create_time", "time_from": ts_start, "time_to": ts_end, "page_size": 100})
-    order_list = safe_list(order_resp, "order_list")
-    sn_all = [o["order_sn"] for o in order_list if "order_sn" in o]
     
-    total_order_masuk = 0
-    total_order_dibatalkan = 0
-    omzet_gross = 0
+    try:
+        r = requests.post(url, params=params, json=payload, timeout=30)
+        res = r.json()
+        if "access_token" in res:
+            SHOPEE_ACCESS_TOKEN = res["access_token"]
+            print("🔄 [Shopee] Access Token berhasil diperbarui via Refresh Token.")
+            return True
+        else:
+            print(f"❌ [Shopee] Gagal refresh token otomatis: {res}")
+            return False
+    except Exception as e:
+        print(f"❌ [Shopee] Error saat auto-refresh token: {e}")
+        return False
 
-    if sn_all:
-        for i in range(0, len(sn_all), 50):
-            chunk = sn_all[i:i+50]
-            detail = shopee_get("/api/v2/order/get_order_detail", {"order_sn_list": ",".join(chunk)})
-            for order in safe_list(detail, "order_list"):
-                total_order_masuk += 1
-                status = order.get("order_status", "")
-                total_amount = safe_int(order.get("total_amount"))
-                if status == "CANCELLED":
-                    total_order_dibatalkan += 1
-                else:
-                    omzet_gross += total_amount
+def shopee_sign(path, timestamp):
+    base = f"{SHOPEE_PARTNER_ID}{path}{timestamp}{SHOPEE_ACCESS_TOKEN}{SHOPEE_SHOP_ID}"
+    return hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
 
-    d["total_order_masuk"]      = total_order_masuk
-    d["total_order_dibatalkan"] = total_order_dibatalkan
-    d["omzet_gross"]            = omzet_gross
-
-    # 7. Returns
-    ret = shopee_get("/api/v2/return/get_return_list", {"page_size": 100, "page_no": 1, "create_time_from": ts_start, "create_time_to": ts_end})
-    d["total_retur"] = len(safe_list(ret, "return_list"))
-
-    # 8. Income Overview
-    income = shopee_get("/api/v2/payment/get_income_overview", {"start_time": ts_start, "end_time": ts_end})
-    d["omzet_harian"] = safe_int(income.get("revenue_from_products") or income.get("total_revenue"))
-
-    # 9. CPC Ads
-    cpc = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {"start_date": date_dmy, "end_date": date_dmy})
-    cpc_data = safe_list(cpc, "daily_performance_list")
-    d["cpc_spend"] = sum(item.get("daily_spend", 0) for item in cpc_data)
-
-    d["follower_toko"] = 0
-    return d
-
-def push_to_lark(d):
-    record = {
-        "Tanggal":                int(d["yesterday_ms"]),
-        "Platform":               PLATFORM,
-        "Total Order Masuk":      d["total_order_masuk"],
-        "Total Order Dibatalkan": d["total_order_dibatalkan"],
-        "Total Retur":            d["total_retur"],
-        "Omzet Harian":           d["omzet_harian"],
-        "Omzet Gross":            d["omzet_gross"],
-        "Follower Toko":          d["follower_toko"],
-        "Skor Performa Toko":     d["skor_performa"],
-        "Poin Penalti":           d["poin_penalti"],
-        "Order Terlambat":        d["order_terlambat"],
-        "Produk Bermasalah":      d["produk_bermasalah"],
-        "Saldo Iklan":            d["saldo_iklan"],
+def shopee_get(path, extra={}):
+    ts = int(time.time())
+    params = {
+        "partner_id": SHOPEE_PARTNER_ID,
+        "timestamp": ts,
+        "access_token": SHOPEE_ACCESS_TOKEN,
+        "shop_id": SHOPEE_SHOP_ID,
+        "sign": shopee_sign(path, ts),
     }
-    print(f"📤 [DEBUG LARK] Mengirim data payload ke Lark Base: {record}")
-    res = lark_add(TABLE_DAILY_OVERVIEW, record)
-    print(f"📥 [DEBUG LARK] Respon balik dari Lark Base API: {res}")
+    params.update(extra)
+    try:
+        r = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
+        data = r.json()
+        if "error" in data and data["error"] != "":
+            print(f"  ⚠️ [{path}]: {data.get('error')} - {data.get('message')}")
+            return {}
+        resp = data.get("response")
+        return resp if isinstance(resp, dict) else {}
+    except Exception as e:
+        print(f"❌ Request error {path}: {e}")
+        return {}
 
-def check_alerts(d):
-    date_ms = d["yesterday_ms"]
-    alerts = []
-    if d["poin_penalti"] >= 5:
-        alerts.append(("Penalti Tinggi", f"Poin penalti mencapai {d['poin_penalti']}", d["poin_penalti"], 0, "High"))
-    if d["order_terlambat"] > 0:
-        alerts.append(("Order Terlambat", f"{d['order_terlambat']} order terlambat kemarin", d["order_terlambat"], 0, "High"))
-    if d["produk_bermasalah"] > 0:
-        alerts.append(("Produk Bermasalah", f"{d['produk_bermasalah']} produk butuh perhatian", d["produk_bermasalah"], 0, "Medium"))
-    if d["saldo_iklan"] < 100_000:
-        alerts.append(("Saldo Iklan Rendah", f"Saldo iklan Rp {d['saldo_iklan']:,.0f}", d["saldo_iklan"], 100000, "High"))
-    if d["total_retur"] > 3:
-        alerts.append(("Retur Tinggi", f"{d['total_retur']} retur kemarin", d["total_retur"], 3, "Medium"))
-    if d["omzet_gross"] == 0 and d["total_order_masuk"] > 0:
-        alerts.append(("Omzet Gross 0", "Ada order tapi omzet gross = 0, cek API", 0, 1, "High"))
+# ============================================================
+# LARK BASE ENGINE & ANTI-DUPLICATE
+# ============================================================
+def get_lark_tenant_token() -> str:
+    global _lark_tenant_token
+    if _lark_tenant_token:
+        return _lark_tenant_token
+    url = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
+    try:
+        r = requests.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            raise Exception(f"Gagal get tenant token: {data.get('msg')}")
+        _lark_tenant_token = data["tenant_access_token"]
+        return _lark_tenant_token
+    except Exception as e:
+        raise Exception(f"❌ get_lark_tenant_token error: {e}")
 
-    for tipe, detail, nilai, normal, prioritas in alerts:
-        push_alert(date_ms, tipe, detail, nilai, normal, prioritas)
+def get_lark_headers():
+    return {
+        "Authorization": f"Bearer {get_lark_tenant_token()}",
+        "Content-Type": "application/json",
+    }
 
+def lark_delete_duplicates(table_id, timestamp_ms, platform_name):
+    """Mencari dan membersihkan data duplikat berdasarkan Tanggal & Platform sebelum insert"""
+    search_url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/search"
+    payload = {
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": "Tanggal", "operator": "is", "value": [timestamp_ms]},
+                {"field_name": "Platform", "operator": "is", "value": [platform_name]}
+            ]
+        }
+    }
+    try:
+        r = requests.post(search_url, headers=get_lark_headers(), json=payload, timeout=30)
+        res_data = r.json()
+        if res_data.get("code") == 0:
+            items = res_data.get("data", {}).get("items", [])
+            if items:
+                print(f"♻️  Ditemukan {len(items)} baris duplikat lama untuk {platform_name}. Membersihkan...")
+                for item in items:
+                    record_id = item.get("record_id")
+                    del_url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/{record_id}"
+                    requests.delete(del_url, headers=get_lark_headers(), timeout=30)
+                print(f"✅ Pembersihan duplikat selesai.")
+    except Exception as e:
+        print(f"⚠️ Gagal menjalankan pengecekan duplikat Lark: {e}")
+
+def lark_add(table_id, fields):
+    if "Tanggal" in fields and "Platform" in fields:
+        lark_delete_duplicates(table_id, fields["Tanggal"], fields["Platform"])
+
+    url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records"
+    try:
+        r = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
+        return r.json()
+    except Exception as e:
+        print(f"❌ Lark request error: {e}")
+        return {"code": -1}
+
+def lark_add_batch(table_id, records_list):
+    if not records_list:
+        return {"code": 0}
+    
+    sample = records_list[0]
+    if "Tanggal" in sample and "Platform" in sample:
+        lark_delete_duplicates(table_id, sample["Tanggal"], sample["Platform"])
+
+    url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/batch_create"
+    try:
+        r = requests.post(url, headers=get_lark_headers(), json={"records": [{"fields": f} for f in records_list]}, timeout=30)
+        return r.json()
+    except Exception as e:
+        print(f"❌ Lark batch error: {e}")
+        return {"code": -1}
+
+# ============================================================
+# PULL DATA FROM SHOPEE PRODUCTION (H-1 TIMELINE)
+# ============================================================
+def fetch_all_shopee_data():
+    print("📥 Mengambil semua data Shopee Jalur Production...")
+    refresh_shopee_access_token()
+    
+    # Konfigurasi penanggalan akurat H-1 (Kemarin penuh)
+    yesterday = datetime.now() - timedelta(days=1)
+    date_str_yesterday = yesterday.strftime("%Y-%m-%d")
+    
+    ts_start_yesterday = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    ts_end_yesterday   = ts_start_yesterday + 86399  # Selesai jam 23:59:59
+    
+    yesterday_ms = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+    data = {}
+    
+    # 1. Endpoint Real-time Toko & Saldo
+    data["shop_info"]   = shopee_get("/api/v2/shop/get_shop_info")
+    data["balance"]     = shopee_get("/api/v2/ads/get_total_balance")
+    
+    # FIX ENDPOINT: Menggunakan struktur modul resmi /account_health/ untuk Production
+    data["shop_perf"]   = shopee_get("/api/v2/account_health/get_shop_performance")
+    data["penalty"]     = shopee_get("/api/v2/account_health/get_penalty_point_history")
+    data["late_orders"] = shopee_get("/api/v2/account_health/get_late_orders")
+    data["issues"]      = shopee_get("/api/v2/account_health/get_listings_with_issues")
+    
+    # 2. Data Transaksi Rentang Waktu H-1
+    data["orders"] = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100,
+    })
+    data["cancelled_orders"] = shopee_get("/api/v2/order/get_order_list", {
+        "time_range_field": "create_time", "time_from": ts_start_yesterday, "time_to": ts_end_yesterday, "page_size": 100, "order_status": "CANCELLED",
+    })
+    
+    # FIX ENDPOINT: Jalur resmi penarikan retur v2 menggunakan /returns/
+    data["returns"] = shopee_get("/api/v2/returns/get_return_list", {
+        "page_no": 1, "page_size": 100, "create_time_from": ts_start_yesterday, "create_time_to": ts_end_yesterday,
+    })
+    
+    # 3. Data Finansial Pendapatan & Iklan Kemarin (H-1)
+    data["income"] = shopee_get("/api/v2/payment/get_income_overview", {
+        "start_date": date_str_yesterday, "end_date": date_str_yesterday,
+    })
+    data["ads"] = shopee_get("/api/v2/ads/get_all_cpc_ads_daily_performance", {
+        "start_date": date_str_yesterday, "end_date": date_str_yesterday,
+    })
+    
+    print(f"✅ Seluruh data Shopee Production untuk tanggal {date_str_yesterday} berhasil dikumpulkan.")
+    return data, yesterday_ms
+
+# ============================================================
+# INTEGRASI KE LARK BASE
+# ============================================================
+def input_daily_overview(d, yesterday_ms):
+    print("📋 Memproses input data ke tabel Daily Overview Lark Base...")
+    
+    shop_perf    = safe_dict(d, "shop_perf")
+    overall_perf = safe_dict(shop_perf, "overall_performance")
+    income       = safe_dict(d, "income")
+    shop_info    = safe_dict(d, "shop_info")
+    penalty      = safe_dict(d, "penalty")
+    late_orders  = safe_dict(d, "late_orders")
+    issues       = safe_dict(d, "issues")
+    balance      = safe_dict(d, "balance")
+
+    all_orders       = safe_list(d.get("orders", {}), "order_list")
+    cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
+    returns_list     = safe_list(d.get("returns", {}), "return_list")
+
+    # Mapping aman agar tipe ribuan koma (,) Excel Lark Base terproses sebagai angka murni
+    fields = {
+        "Tanggal":                yesterday_ms,
+        "Platform":               "Shopee",
+        "Total Order Masuk":      safe_int(len(all_orders)),
+        "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
+        "Total Retur":            safe_int(len(returns_list)),
+        "Omzet Harian":           safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Omzet Gross":            safe_int((income.get("total_income") or {}).get("released_amount", 0)),
+        "Follower Toko":          safe_int(shop_info.get("follower_count", 0)),
+        "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
+        "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
+        "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
+        "Produk Bermasalah":      safe_int(issues.get("total_count", 0)),
+        "Saldo Iklan":            safe_int(balance.get("total_balance", 0)),
+    }
+
+    print(f"📤 [DEBUG LARK] Mengirim data payload ke Lark Base: {fields}")
+    result = lark_add(TABLE_DAILY_OVERVIEW, fields)
+    print(f"📥 [DEBUG LARK] Respon balik dari Lark Base API: {result}")
+
+def input_alerts(d, yesterday_ms):
+    print("🚨 Memeriksa ambang batas anomali untuk pembuatan Alert Log...")
+    balance  = safe_dict(d, "balance")
+    income   = safe_dict(d, "income")
+    alerts   = []
+
+    saldo = safe_int(balance.get("total_balance", 0))
+    if saldo < 100000:
+        alerts.append({
+            "Tanggal": yesterday_ms, "Platform": "Shopee",
+            "Tipe Alert": "Iklan Hampir Habis",
+            "Detail": f"Saldo iklan kritis Rp {saldo:,} — segera lakukan top up!",
+            "Nilai Saat Ini": saldo, "Nilai Normal": 100000,
+            "Prioritas": "High", "Status": "Open",
+        })
+
+    omzet_gross = safe_int((income.get("total_income") or {}).get("released_amount", 0))
+    all_orders = safe_list(d.get("orders", {}), "order_list")
+    
+    if len(all_orders) > 0 and omzet_gross == 0:
+        alerts.append({
+            "Tanggal": yesterday_ms, "Platform": "Shopee",
+            "Tipe Alert": "Omzet Gross 0",
+            "Detail": f"Ada {len(all_orders)} order masuk kemarin, tapi omzet gross tercatat 0. Periksa status pelepasan dana API.",
+            "Nilai Saat Ini": 0, "Nilai Normal": 1,
+            "Prioritas": "High", "Status": "Open",
+        })
+
+    if alerts:
+        result = lark_add_batch(TABLE_ALERT_LOG, alerts)
+        print(f"🤖 [DEBUG ALERT] Respon penulisan Alert Log ke Lark Base: {result}")
+    else:
+        print("✅ Kondisi operasional toko normal, tidak ada alert baru hari ini.")
+
+# ============================================================
+# MAIN ORCHESTRATOR
+# ============================================================
 def main():
-    print("=" * 50)
-    print("🚀 zeodda_daily_overview.py — START")
-    print("=" * 50)
+    print("=" * 60)
+    print(f"🚀 ZEODDA SYSTEM AUTOMATION — START CONTROL")
+    print("=" * 60)
 
-    lark_init()
-    time_data = get_yesterday_range()
-    
-    d = dict(time_data)
-    try:
-        d = collect(d)
-    except Exception as e:
-        print(f"❌ ERROR saat collect data: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    if not LARK_APP_ID or not LARK_APP_SECRET:
+        raise Exception("❌ Environment Variable LARK_APP_ID atau LARK_APP_SECRET belum dikonfigurasi!")
+        
+    # Inisialisasi token Lark Base
+    get_lark_tenant_token()
 
-    try:
-        push_to_lark(d)
-    except Exception as e:
-        print(f"❌ ERROR saat push Lark: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    # Eksekusi proses penarikan data produksi Shopee
+    shopee_data, target_date_ms = fetch_all_shopee_data()
 
-    try:
-        check_alerts(d)
-    except Exception as e:
-        print(f"⚠️ ERROR saat check alerts: {e}")
+    # Push data bersih ke Lark Base
+    input_daily_overview(shopee_data, target_date_ms)
+    input_alerts(shopee_data, target_date_ms)
 
-    print("\n✅ zeodda_daily_overview.py — DONE")
+    print("=" * 60)
+    print("✅ ZEODDA SYSTEM AUTOMATION — DONE WORKFLOW SUCCESS")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
