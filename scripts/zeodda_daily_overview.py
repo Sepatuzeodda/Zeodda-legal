@@ -222,22 +222,28 @@ def collect_star_ratings():
             break
         offset += 100
 
-    print(f"⭐ Ambil rating dari {len(item_ids)} produk...")
+    print(f"Rating dari {len(item_ids)} produk...")
 
     for iid in item_ids:
-        # Page 1 saja (100 review terbaru) — cukup untuk tracking kumulatif harian
-        resp     = shopee_get("/api/v2/product/get_comment", {
+        # 1 request per produk — pakai field summary agregat, bukan loop semua comment
+        resp = shopee_get("/api/v2/product/get_comment", {
             "item_id":   iid,
-            "page_size": 100,
+            "page_size": 1,
             "page_no":   1,
         })
-        comments = safe_list(resp, "item_comment_list")
-        for c in comments:
-            s = safe_int(c.get("rating_star", 0))
-            if s in stars:
-                stars[s] += 1
+        # item_rating_summary: {"rating_1": x, ..., "rating_5": x}
+        rating_summary = resp.get("item_rating_summary") or {}
+        if rating_summary:
+            for i in range(1, 6):
+                stars[i] += safe_int(rating_summary.get(f"rating_{i}", 0))
+        else:
+            # Fallback: rating_total = [count_1, count_2, ..., count_5]
+            rating_total = resp.get("rating_total") or []
+            if isinstance(rating_total, list) and len(rating_total) >= 5:
+                for i, count in enumerate(rating_total[:5], start=1):
+                    stars[i] += safe_int(count)
 
-    print(f"   ⭐5={stars[5]} ⭐4={stars[4]} ⭐3={stars[3]} ⭐2={stars[2]} ⭐1={stars[1]}")
+    print(f"   stars={stars}")
     return stars
 
 # ============================================================
