@@ -8,15 +8,18 @@ jobs:
   run-boost:
     runs-on: ubuntu-latest
     env:
-      SHOPEE_PARTNER_ID:    ${{ secrets.SHOPEE_PARTNER_ID }}
-      SHOPEE_PARTNER_KEY:   ${{ secrets.SHOPEE_PARTNER_KEY }}
-      SHOPEE_SHOP_IDS:      ${{ secrets.SHOPEE_SHOP_IDS }}
-      SHOPEE_ACCESS_TOKEN:  ${{ secrets.SHOPEE_ACCESS_TOKEN }}
-      SHOPEE_REFRESH_TOKEN: ${{ secrets.SHOPEE_REFRESH_TOKEN }}
-      LARK_APP_ID:          ${{ secrets.LARK_APP_ID }}
-      LARK_APP_SECRET:      ${{ secrets.LARK_APP_SECRET }}
-      GH_PAT:               ${{ secrets.GH_PAT }}
-      GH_REPO:              ${{ github.repository }}
+      SHOPEE_PARTNER_ID:     ${{ secrets.SHOPEE_PARTNER_ID }}
+      SHOPEE_PARTNER_KEY:    ${{ secrets.SHOPEE_PARTNER_KEY }}
+      SHOPEE_SHOP_IDS:       ${{ secrets.SHOPEE_SHOP_IDS }}
+      SHOPEE_ACCESS_TOKEN:   ${{ secrets.SHOPEE_ACCESS_TOKEN }}
+      SHOPEE_REFRESH_TOKEN:  ${{ secrets.SHOPEE_REFRESH_TOKEN }}
+      # Injeksi rahasia token khusus masing-masing toko cabang
+      SHOPEE_REFRESH_TOKEN_981846983: ${{ secrets.SHOPEE_REFRESH_TOKEN_981846983 }}
+      SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
+      LARK_APP_ID:           ${{ secrets.LARK_APP_ID }}
+      LARK_APP_SECRET:       ${{ secrets.LARK_APP_SECRET }}
+      GH_PAT:                ${{ secrets.GH_PAT }}
+      GH_REPO:               ${{ github.repository }}
 
     steps:
       - name: Checkout repository
