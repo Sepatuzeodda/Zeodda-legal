@@ -1,20 +1,20 @@
 """
 scripts/zeodda_daily_overview.py
 Mengambil data ringkasan harian dari Shopee API dan menyimpannya ke Lark Base TABLE_DAILY_OVERVIEW.
-Revisi: Memperbaiki pemanggilan lark_init() yang tidak mengembalikan nilai (None) agar tidak memicu TypeError.
+Revisi: Menggunakan wildcard import (from zeodda_helpers import *) untuk menghindari ImportError akibat penulisan daftar fungsi manual yang salah di line 31.
 """
 
+# Gunakan wildcard import agar seluruh helper (shopee_get, lark_init, dll.) terbawa otomatis tanpa error
 from zeodda_helpers import *
 
 def main():
     try:
-        # Perbaikan: lark_init() di zeodda_helpers.py tidak me-return apapun (None).
-        # Jangan melakukan unpacking variable seperti `token, app_token = lark_init()` karena memicu TypeError.
+        # Inisialisasi token Lark
         lark_init() 
         
         # Ambil range waktu kemarin WIB
         date_info = get_yesterday_range()
-        yesterday_str = date_info["date_str"] # Format YYYY-MM-DD
+        yesterday_str = date_info["date_str"]
         
         print(f"🚀 Memulai penarikan data Daily Overview untuk tanggal: {yesterday_str}")
         
@@ -65,51 +65,4 @@ def main():
                     total_amount = safe_int(order.get("total_amount"))
                     
                     if status == "CANCELLED":
-                        total_order_batal += 1
-                    elif status in ["COMPLETED", "PROCESSED", "SHIPPED"]:
-                        omzet_harian += escrow_amount
-                        omzet_gross += total_amount
-                    else:
-                        omzet_gross += total_amount
-
-        # 7. Ambil Data Retur (get_return_list)
-        return_params = {
-            "create_time_from": date_info["ts_start"],
-            "create_time_to": date_info["ts_end"],
-            "page_size": 100
-        }
-        return_res = shopee_get("/api/v2/return/get_return_list", return_params)
-        total_retur = len(safe_list(return_res, "return_list"))
-
-        # 8. Mapping fields ke Lark Base
-        lark_fields = {
-            "Tanggal": yesterday_str,
-            "Platform": "Shopee",
-            "Total Order Masuk": total_order_masuk,
-            "Total Order Dibatalkan": total_order_batal,
-            "Total Retur": total_retur,
-            "Omzet Harian": omzet_harian,
-            "Omzet Gross": omzet_gross,
-            "Follower Toko": 0, 
-            "Skor Performa Toko": shop_score,
-            "Poin Penalti": penalty_points,
-            "Order Terlambat": late_orders,
-            "Produk Bermasalah": issue_products,
-            "Saldo Iklan": ads_balance
-        }
-        
-        # 9. Push data ke Lark Base
-        print(f"📤 Mengirim data ke Lark Base...")
-        res = lark_add(TABLE_DAILY_OVERVIEW, lark_fields)
-        
-        if res.get("code") == 0:
-            print("✅ Sukses sinkronisasi Daily Overview ke Lark Base.")
-        else:
-            print(f"❌ Gagal sinkronisasi. Response: {res}")
-            
-    except Exception as e:
-        print(f"💥 Terjadi fatal error pada script: {e}")
-        raise e # Re-raise error agar GitHub Actions menandakan step ini gagal
-
-if __name__ == "__main__":
-    main()
+                        total_order_b
