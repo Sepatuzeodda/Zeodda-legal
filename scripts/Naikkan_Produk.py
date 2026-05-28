@@ -16,22 +16,100 @@ LARK_APP_SECRET      = os.environ.get("LARK_APP_SECRET", "")
 LARK_APP_TOKEN       = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
 LARK_BASE_URL        = "https://open.larksuite.com"
 TABLE_BOOST          = "tblzcjLMZX2KZ4aW"
+GH_PAT               = os.environ.get("GH_PAT", "").strip()
+GH_REPO              = os.environ.get("GH_REPO", "").strip()
 MAX_BOOST            = 5
 
-# Membaca token aktif level master dari GitHub Secrets
-_ACCESS_TOKEN  = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
+_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
 _lark_token    = None
 
-def shopee_post(path, payload, shop_id):
-    """Menggunakan Master Token secara langsung ke target Toko Cabang"""
-    global _ACCESS_TOKEN
+# ============================================================
+# GITHUB SECRET SAVE
+# ============================================================
+def save_secret_to_github(name, value):
+    if not GH_PAT or not GH_REPO:
+        return
+    try:
+        from nacl import encoding, public
+        import base64
+
+        r = requests.get(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/public-key",
+            headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
+            timeout=10
+        )
+        data    = r.json()
+        key_id  = data["key_id"]
+        pub_key = data["key"]
+
+        pk        = public.PublicKey(pub_key.encode(), encoding.Base64Encoder())
+        encrypted = base64.b64encode(public.SealedBox(pk).encrypt(value.encode())).decode()
+
+        r2 = requests.put(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/{name}",
+            headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
+            json={"encrypted_value": encrypted, "key_id": key_id},
+            timeout=10
+        )
+        if r2.status_code in (201, 204):
+            print(f"  ✅ Secret {name} tersimpan ke GitHub")
+        else:
+            print(f"  ❌ Gagal simpan {name}: {r2.status_code}")
+    except Exception as e:
+        print(f"  ⚠️ save_secret error: {e}")
+
+# ============================================================
+# SHOPEE TOKEN AUTOMATION (INDIVIDUAL SHOP REFRESH ENGINE)
+# ============================================================
+def get_active_token_for_shop(shop_id):
+    """Mendapatkan access token segar khusus untuk target shop_id terkait"""
+    global _REFRESH_TOKEN
+    path = "/api/v2/auth/access_token/get"
+    ts   = int(time.time())
+    sign = hmac.new(
+        SHOPEE_PARTNER_KEY.encode(),
+        f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
+        hashlib.sha256
+    ).hexdigest()
+    
+    payload = {
+        "refresh_token": _REFRESH_TOKEN,
+        "partner_id": SHOPEE_PARTNER_ID,
+        "shop_id": int(shop_id)
+    }
+    try:
+        r = requests.post(
+            f"{SHOPEE_BASE_URL}{path}",
+            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
+            json=payload,
+            timeout=30
+        )
+        res = r.json()
+        if "access_token" in res and res["access_token"]:
+            # Simpan refresh token baru jika Shopee melakukan rotasi
+            new_refresh = res.get("refresh_token", "")
+            if new_refresh and new_refresh != _REFRESH_TOKEN:
+                _REFRESH_TOKEN = new_refresh
+                print(f"  🔑 Terdeteksi rotasi token baru, memperbarui GitHub Secrets...")
+                save_secret_to_github("SHOPEE_REFRESH_TOKEN", new_refresh)
+            
+            # Kembalikan access token murni toko terkait
+            return res["access_token"]
+        else:
+            print(f"  ❌ Gagal pembuatan token untuk Toko {shop_id}: {res.get('error')} - {res.get('message')}")
+            return None
+    except Exception as e:
+        print(f"  ❌ Error request token Toko {shop_id}: {e}")
+        return None
+
+def shopee_post(path, payload, shop_id, access_token):
     ts    = int(time.time())
-    base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{_ACCESS_TOKEN}{shop_id}"
+    base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{access_token}{shop_id}"
     sign  = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
     params = {
         "partner_id":   SHOPEE_PARTNER_ID,
         "timestamp":    ts,
-        "access_token": _ACCESS_TOKEN,
+        "access_token": access_token,
         "shop_id":      int(shop_id),
         "sign":         sign,
     }
@@ -139,10 +217,16 @@ def update_boost_timestamp(record_id):
         print(f"  ❌ Update timestamp gagal: {result.get('code')} {result.get('msg')}")
 
 # ============================================================
-# CORE EXECUTOR PER SHOP
+# BOOST EXECUTION
 # ============================================================
 def boost_for_shop(shop_id, items):
     print(f"\n🏪 Toko {shop_id} — {len(items)} produk aktif")
+
+    # Minta token segar khusus untuk toko ini secara mandiri
+    shop_access_token = get_active_token_for_shop(shop_id)
+    if not shop_access_token:
+        print(f"  ❌ Skip toko {shop_id} — Gagal inisialisasi token.")
+        return 0
 
     sorted_items = sort_candidates(items)
     to_boost     = sorted_items[:MAX_BOOST]
@@ -175,8 +259,8 @@ def boost_for_shop(shop_id, items):
         print(f"  ⚠️ Tidak ada item valid untuk toko {shop_id}")
         return 0
 
-    print(f"  📤 Menjalankan Boost {len(item_ids)} produk langsung via Master Token...")
-    raw_res = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id)
+    print(f"  📤 Menjalankan Boost {len(item_ids)} produk via Token Spesifik Toko...")
+    raw_res = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_access_token)
     
     if not raw_res:
         print(f"  ❌ Gagal total eksekusi API untuk Toko {shop_id}. Lewati proses data.")
@@ -214,10 +298,8 @@ def main():
     print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 50)
 
-    if not _ACCESS_TOKEN:
-        print("❌ ABORTED: Environment Variable SHOPEE_ACCESS_TOKEN kosong!")
-        print("   Pastikan GitHub Actions Anda sudah menjalankan script daily_overview")
-        print("   atau Secrets di repositori sudah terisi token hidup.")
+    if not _REFRESH_TOKEN:
+        print("❌ ABORTED: Environment Variable SHOPEE_REFRESH_TOKEN kosong!")
         return
 
     if not LARK_APP_ID or not LARK_APP_SECRET:
