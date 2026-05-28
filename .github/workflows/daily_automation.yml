@@ -1,28 +1,27 @@
-name: Zeodda Daily Automation
+# .github/workflows/zeodda_automation.yml
+name: Zeodda Automation
+
 on:
   schedule:
-    - cron: '0 20 * * *'  # Jam 03:00 WIB = 20:00 UTC
+    - cron: '0 20 * * *' # Jam 03:00 WIB
   workflow_dispatch:
 
 jobs:
   run-automation:
     runs-on: ubuntu-latest
+    
+    # Daftarkan env di level JOB agar bisa dibaca oleh semua script python
     env:
-      SHOPEE_PARTNER_ID:         ${{ secrets.SHOPEE_PARTNER_ID }}
-      SHOPEE_PARTNER_KEY:        ${{ secrets.SHOPEE_PARTNER_KEY }}
-      SHOPEE_SHOP_ID:            ${{ secrets.SHOPEE_SHOP_ID }}
-      SHOPEE_ACCESS_TOKEN:       ${{ secrets.SHOPEE_ACCESS_TOKEN }}
-      LARK_APP_ID:               ${{ secrets.LARK_APP_ID }}
-      LARK_APP_SECRET:           ${{ secrets.LARK_APP_SECRET }}
-      TIKTOK_SHOP_APP_KEY:       ${{ secrets.TIKTOK_SHOP_APP_KEY }}
-      TIKTOK_SHOP_APP_SECRET:    ${{ secrets.TIKTOK_SHOP_APP_SECRET }}
-      TIKTOK_SHOP_ACCESS_TOKEN:  ${{ secrets.TIKTOK_SHOP_ACCESS_TOKEN }}
-      TIKTOK_SHOP_REFRESH_TOKEN: ${{ secrets.TIKTOK_SHOP_REFRESH_TOKEN }}
-      TIKTOK_SHOP_SHOP_ID:       ${{ secrets.TIKTOK_SHOP_SHOP_ID }}
-      TIKTOK_SHOP_CIPHER:        ${{ secrets.TIKTOK_SHOP_CIPHER }}
+      SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
+      SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
+      SHOPEE_SHOP_ID: ${{ secrets.SHOPEE_SHOP_ID }}
+      SHOPEE_ACCESS_TOKEN: ${{ secrets.SHOPEE_ACCESS_TOKEN }}
+      SHOPEE_REFRESH_TOKEN: ${{ secrets.SHOPEE_REFRESH_TOKEN }} # WAJIB BARIS INI
+      LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+      LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repo
         uses: actions/checkout@v3
 
       - name: Setup Python
@@ -30,25 +29,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: pip install requests
 
-      - name: Daily Overview
+      - name: Run Daily Overview
         run: python scripts/zeodda_daily_overview.py
-
-      # - name: Product Performance
-      #   run: python scripts/zeodda_product_performance.py
-
-      # - name: Ads
-      #   run: python scripts/zeodda_ads.py
-
-      # - name: Financial
-      #   run: python scripts/zeodda_financial.py
-
-      - name: Notify success
-        if: success()
-        run: echo "✅ Automation berhasil pada $(date)"
-
-      - name: Notify failure
-        if: failure()
-        run: echo "❌ Automation gagal pada $(date)"
