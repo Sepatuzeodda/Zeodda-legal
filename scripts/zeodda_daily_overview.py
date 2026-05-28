@@ -132,13 +132,32 @@ def get_lark_tenant_token() -> str:
 def get_lark_headers():
     return {"Authorization": f"Bearer {get_lark_tenant_token()}", "Content-Type": "application/json"}
 
-def lark_delete_duplicates(table_id, timestamp_ms, platform_name):
+def lark_get_fields(table_id):
+    """Print semua nama field di tabel Lark untuk debug."""
+    url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/fields"
+    try:
+        r    = requests.get(url, headers=get_lark_headers(), timeout=30)
+        data = r.json()
+        if data.get("code") == 0:
+            fields = data.get("data", {}).get("items", [])
+            print(f"\n📋 Field di tabel Lark ({len(fields)} field):")
+            for f in fields:
+                print(f"   '{f.get('field_name')}' — type={f.get('type')}")
+        else:
+            print(f"  ❌ get_fields error: {data.get('code')} {data.get('msg')}")
+    except Exception as e:
+        print(f"  ❌ get_fields error: {e}")
+
+def lark_delete_duplicates(table_id, date_str, platform_name):
+    """
+    Hapus duplikat pakai filter text pada field Tanggal (date string YYYY-MM-DD)
+    bukan timestamp ms — lebih kompatibel dengan berbagai tipe field Lark.
+    """
     search_url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/search"
     payload = {
         "filter": {
             "conjunction": "and",
             "conditions": [
-                {"field_name": "Tanggal", "operator": "is", "value": [timestamp_ms]},
                 {"field_name": "Platform", "operator": "is", "value": [platform_name]}
             ]
         }
@@ -146,27 +165,40 @@ def lark_delete_duplicates(table_id, timestamp_ms, platform_name):
     try:
         r        = requests.post(search_url, headers=get_lark_headers(), json=payload, timeout=30)
         res_data = r.json()
-        print(f"  🔍 Search duplicate: code={res_data.get('code')} msg={res_data.get('msg','')}")
         if res_data.get("code") == 0:
             items = res_data.get("data", {}).get("items", [])
-            print(f"  🗑️  Duplikat ditemukan: {len(items)} record")
+            deleted = 0
             for item in items:
-                record_id = item.get("record_id")
-                del_url   = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/{record_id}"
-                dr        = requests.delete(del_url, headers=get_lark_headers(), timeout=30)
-                print(f"     Hapus {record_id}: code={dr.json().get('code')}")
+                # Cek apakah tanggal record match dengan date_str
+                tanggal_val = item.get("fields", {}).get("Tanggal")
+                # Lark Date field return timestamp ms — convert ke date string
+                if tanggal_val:
+                    try:
+                        record_date = datetime.utcfromtimestamp(tanggal_val / 1000).strftime("%Y-%m-%d")
+                        if record_date == date_str:
+                            record_id = item.get("record_id")
+                            del_url   = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/{record_id}"
+                            dr        = requests.delete(del_url, headers=get_lark_headers(), timeout=30)
+                            print(f"  🗑️  Hapus duplikat {record_id} ({record_date}): code={dr.json().get('code')}")
+                            deleted += 1
+                    except Exception:
+                        pass
+            if deleted == 0:
+                print(f"  ✅ Tidak ada duplikat untuk {date_str}")
+        else:
+            print(f"  ⚠️ Search duplikat gagal: {res_data.get('code')} {res_data.get('msg')}")
     except Exception as e:
         print(f"  ❌ lark_delete_duplicates error: {e}")
 
-def lark_add(table_id, fields):
-    if "Tanggal" in fields and "Platform" in fields:
-        lark_delete_duplicates(table_id, fields["Tanggal"], fields["Platform"])
+def lark_add(table_id, fields, date_str):
+    lark_delete_duplicates(table_id, date_str, fields.get("Platform", "Shopee"))
     url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records"
     try:
         r      = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
         result = r.json()
         if result.get("code") != 0:
             print(f"  ❌ Lark add error {result.get('code')}: {result.get('msg')}")
+            print(f"  📄 Full response: {result}")
         else:
             print("  ✅ Lark record added OK")
         return result
@@ -180,22 +212,20 @@ def lark_add(table_id, fields):
 def fetch_all_shopee_data():
     refresh_shopee_access_token()
 
-    # FIX: Gunakan WIB bukan UTC server
     now_wib       = datetime.utcnow() + timedelta(hours=7)
     yesterday_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
 
-    # Shopee API pakai Unix timestamp UTC
     ts_start_yesterday = int((yesterday_wib - timedelta(hours=7)).timestamp())
     ts_end_yesterday   = ts_start_yesterday + 86399
     yesterday_ms       = int(yesterday_wib.timestamp() * 1000)
+    date_str           = yesterday_wib.strftime("%Y-%m-%d")
 
-    date_str = yesterday_wib.strftime("%Y-%m-%d")
     print(f"📅 Tanggal target : {date_str} WIB")
     print(f"⏱️  ts_start={ts_start_yesterday} | ts_end={ts_end_yesterday}")
 
     data = {}
-
-    data["merchant_info"] = shopee_get("/api/v2/merchant/get_merchant_info")
+    data["date_str"]      = date_str
+    data["yesterday_ms"]  = yesterday_ms
     data["balance"]       = shopee_get("/api/v2/ads/get_total_balance")
     data["shop_perf"]     = shopee_get("/api/v2/account_health/get_shop_performance")
     data["penalty"]       = shopee_get("/api/v2/account_health/get_penalty_point_history")
@@ -226,7 +256,6 @@ def fetch_all_shopee_data():
         "create_time_to":   ts_end_yesterday,
     })
 
-    # ── Hitung Omzet & Subsidi ────────────────────────────────
     omzet_harian  = 0.0
     omzet_gross   = 0.0
     total_subsidi = 0.0
@@ -255,7 +284,6 @@ def fetch_all_shopee_data():
                     continue
 
                 if total_amount == 0 and status == "UNPAID":
-                    # UNPAID: total_amount belum ada, hitung dari item
                     item_sum = sum(
                         safe_float(item.get("model_discounted_price", 0)) *
                         safe_float(item.get("model_quantity_purchased", 1))
@@ -269,7 +297,6 @@ def fetch_all_shopee_data():
                     omzet_gross  += total_amount
                     print(f"   ✅ {status} {sn}: total={total_amount:.0f} ongkir={shipping_fee:.0f} harian+={total_amount - shipping_fee:.0f}")
 
-                # Subsidi dari escrow_detail
                 escrow       = shopee_get("/api/v2/payment/get_escrow_detail", {"order_sn": sn})
                 order_income = safe_dict(escrow, "order_income")
                 subsidi      = (
@@ -289,39 +316,23 @@ def fetch_all_shopee_data():
     data["calculated_omzet_gross"]  = safe_int(omzet_gross)
     data["calculated_subsidi_mp"]   = safe_int(total_subsidi)
 
-    return data, yesterday_ms
+    return data
 
 
-def input_daily_overview(d, yesterday_ms):
-    shop_perf     = safe_dict(d, "shop_perf")
-    overall_perf  = safe_dict(shop_perf, "overall_performance")
-    merchant_info = safe_dict(d, "merchant_info")
-    penalty       = safe_dict(d, "penalty")
-    late_orders   = safe_dict(d, "late_orders")
-    issues        = safe_dict(d, "issues")
-    balance       = safe_dict(d, "balance")
+def input_daily_overview(d):
+    shop_perf    = safe_dict(d, "shop_perf")
+    overall_perf = safe_dict(shop_perf, "overall_performance")
+    penalty      = safe_dict(d, "penalty")
+    late_orders  = safe_dict(d, "late_orders")
+    issues       = safe_dict(d, "issues")
+    balance      = safe_dict(d, "balance")
 
     all_orders       = safe_list(d.get("orders", {}), "order_list")
     cancelled_orders = safe_list(d.get("cancelled_orders", {}), "order_list")
     returns_list     = safe_list(d.get("returns", {}), "return_list")
 
-    # Follower — placeholder sampai permission Shop aktif
-    # Uncomment setelah permission aktif:
-    # auth_shops = safe_list(merchant_info, "auth_shops")
-    # total_followers = next(
-    #     (safe_int(s.get("follower_count", 0)) for s in auth_shops if s.get("shop_id") == SHOPEE_SHOP_ID), 0
-    # )
-    total_followers = 0
-
-    # Penjualan per pesanan (hitung manual)
-    total_order_valid     = len(all_orders) - len(cancelled_orders)
-    penjualan_per_pesanan = (
-        safe_int(d["calculated_omzet_harian"] / total_order_valid)
-        if total_order_valid > 0 else 0
-    )
-
     fields = {
-        "Tanggal":                yesterday_ms,
+        "Tanggal":                d["yesterday_ms"],
         "Platform":               "Shopee",
         "Total Order Masuk":      safe_int(len(all_orders)),
         "Total Order Dibatalkan": safe_int(len(cancelled_orders)),
@@ -329,8 +340,7 @@ def input_daily_overview(d, yesterday_ms):
         "Omzet Harian":           d["calculated_omzet_harian"],
         "Omzet Gross":            d["calculated_omzet_gross"],
         "Subsidi MP":             d["calculated_subsidi_mp"],
-        "Penjualan per Pesanan":  penjualan_per_pesanan,
-        "Follower Toko":          total_followers,
+        "Follower Toko":          0,
         "Skor Performa Toko":     safe_int(overall_perf.get("rating", 0)),
         "Poin Penalti":           safe_int(penalty.get("total_penalty_point", 0)),
         "Order Terlambat":        safe_int(late_orders.get("total_count", 0)),
@@ -340,17 +350,20 @@ def input_daily_overview(d, yesterday_ms):
 
     print(f"\n📊 Fields yang akan di-push ke Lark:")
     for k, v in fields.items():
-        print(f"   {k}: {v}")
+        print(f"   '{k}': {v}")
 
-    lark_add(TABLE_DAILY_OVERVIEW, fields)
+    # Print semua field yang ada di Lark dulu untuk debug
+    lark_get_fields(TABLE_DAILY_OVERVIEW)
+
+    lark_add(TABLE_DAILY_OVERVIEW, fields, d["date_str"])
 
 
 def main():
     if not LARK_APP_ID or not LARK_APP_SECRET:
         print("❌ LARK_APP_ID atau LARK_APP_SECRET tidak ada!")
         return
-    shopee_data, target_date_ms = fetch_all_shopee_data()
-    input_daily_overview(shopee_data, target_date_ms)
+    shopee_data = fetch_all_shopee_data()
+    input_daily_overview(shopee_data)
     print("\n✅ Daily Overview selesai.")
 
 if __name__ == "__main__":
