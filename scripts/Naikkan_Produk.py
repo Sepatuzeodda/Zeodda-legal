@@ -171,14 +171,16 @@ def group_by_shop(items):
         fields    = item.get("fields", {})
         shop_raw  = fields.get("Shop ID")
         # Debug: print raw value untuk lihat format
-        print(f"  DEBUG Shop ID raw: {repr(shop_raw)}")
+        # print(f"  DEBUG Shop ID raw: {repr(shop_raw)}")
         try:
-            if isinstance(shop_raw, (int, float)) and shop_raw:
+            if isinstance(shop_raw, dict) and shop_raw.get("value"):
+                # Lark Lookup field: {"type": 2, "value": [shop_id]}
+                shop_id = int(shop_raw["value"][0])
+            elif isinstance(shop_raw, (int, float)) and shop_raw:
                 shop_id = int(shop_raw)
             elif isinstance(shop_raw, str) and shop_raw.strip().isdigit():
                 shop_id = int(shop_raw.strip())
             elif isinstance(shop_raw, list) and shop_raw:
-                # Lark text field format
                 shop_id = int(str(shop_raw[0].get("text", "")).strip())
             else:
                 shop_id = None
