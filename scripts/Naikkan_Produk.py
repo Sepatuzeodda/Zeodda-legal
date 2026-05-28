@@ -59,10 +59,10 @@ def save_secret_to_github(name, value):
         print(f"  ⚠️ save_secret error: {e}")
 
 # ============================================================
-# SHOPEE TOKEN AUTOMATION (FIXED PUBLIC PATH V2)
+# SHOPEE TOKEN AUTOMATION (CORRECT PRODUCTION PATH)
 # ============================================================
 def get_active_token_for_shop(shop_id):
-    """Menghasilkan Access Token menggunakan jalur resmi /public/refresh_access_token"""
+    """Menghasilkan Access Token menggunakan jalur resmi Shopee v2"""
     env_key = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
     local_refresh = os.environ.get(env_key, "").strip() or _GLOBAL_REFRESH_TOKEN
     
@@ -70,8 +70,8 @@ def get_active_token_for_shop(shop_id):
         print(f"  ❌ Gagal: Tidak ada REFRESH_TOKEN untuk Toko {shop_id}")
         return None
         
-    # FIX: Mengubah jalur modul endpoint ke kelompok Public resmi Shopee Production
-    path = "/api/v2/public/refresh_access_token"
+    # KOREKSI FIX: Jalur endpoint resmi Shopee v2 untuk refresh token tetap di /auth/access_token/get
+    path = "/api/v2/auth/access_token/get"
     ts   = int(time.time())
     
     base_string = f"{SHOPEE_PARTNER_ID}{path}{ts}"
