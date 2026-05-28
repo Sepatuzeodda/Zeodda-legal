@@ -18,7 +18,9 @@ LARK_BASE_URL        = "https://open.larksuite.com"
 TABLE_BOOST          = "tblzcjLMZX2KZ4aW"
 GH_PAT               = os.environ.get("GH_PAT", "").strip()
 GH_REPO              = os.environ.get("GH_REPO", "").strip()
-MERCHANT_ID          = 1777961  # ID Utama Merchant Sub-Account Anda
+
+# AUTO-DETECT MERCHANT ID: Mengambil dari env jika Anda menyimpannya, atau default fallback
+MERCHANT_ID          = int(os.environ.get("SHOPEE_MERCHANT_ID") or "1777961")
 MAX_BOOST            = 5
 
 _ACCESS_TOKEN  = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
@@ -61,13 +63,13 @@ def save_secret_to_github(name, value):
         print(f"  ⚠️ save_secret error: {e}")
 
 # ============================================================
-# SHOPEE TOKEN AUTOMATION (SUB-ACCOUNT FIXED)
+# SHOPEE TOKEN AUTOMATION (HYBRID SUB-ACCOUNT REFRESH)
 # ============================================================
 def refresh_token():
-    """Membuka akses Master Token menggunakan Merchant ID yang valid"""
+    """Membuka akses Master Token dengan penanganan kegagalan parameter merchant"""
     global _ACCESS_TOKEN, _REFRESH_TOKEN
     if not _REFRESH_TOKEN:
-        print("⚠️ Gagal: SHOPEE_REFRESH_TOKEN kosong di environment variable.")
+        print("⚠️ Gagal: SHOPEE_REFRESH_TOKEN kosong.")
         return
     path = "/api/v2/auth/access_token/get"
     ts   = int(time.time())
@@ -77,36 +79,40 @@ def refresh_token():
         hashlib.sha256
     ).hexdigest()
     
-    try:
-        # PERBAIKAN: Payload wajib menggunakan merchant_id untuk otorisasi tipe Sub-Account
-        payload = {
-            "refresh_token": _REFRESH_TOKEN, 
-            "partner_id": SHOPEE_PARTNER_ID, 
-            "merchant_id": MERCHANT_ID
-        }
-        r = requests.post(
-            f"{SHOPEE_BASE_URL}{path}",
-            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
-            json=payload,
-            timeout=30
-        )
-        res = r.json()
-        if "access_token" in res and res["access_token"]:
-            _ACCESS_TOKEN = res["access_token"]
-            print("🔄 Master Access token refreshed OK")
-            new_refresh = res.get("refresh_token", "")
-            if new_refresh and new_refresh != _REFRESH_TOKEN:
-                _REFRESH_TOKEN = new_refresh
-                print("🔑 Refresh token baru — menyimpan ke GitHub Secrets...")
-                save_secret_to_github("SHOPEE_REFRESH_TOKEN", new_refresh)
-            save_secret_to_github("SHOPEE_ACCESS_TOKEN", _ACCESS_TOKEN)
-        else:
-            print(f"❌ Refresh gagal: {res.get('error')} - {res.get('message')}")
-    except Exception as e:
-        print(f"❌ Refresh error: {e}")
+    # STRATEGI CADANGAN: Mencoba menggunakan merchant_id dulu, jika gagal tautan, coba via shop_id alternatif
+    payload_options = [
+        {"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "merchant_id": MERCHANT_ID},
+        {"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "shop_id": 963980234}
+    ]
+    
+    success = False
+    for payload in payload_options:
+        try:
+            r = requests.post(
+                f"{SHOPEE_BASE_URL}{path}",
+                params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
+                json=payload,
+                timeout=30
+            )
+            res = r.json()
+            if "access_token" in res and res["access_token"]:
+                _ACCESS_TOKEN = res["access_token"]
+                print(f"🔄 Master Access token refreshed OK via {'merchant_id' if 'merchant_id' in payload else 'shop_id'}")
+                new_refresh = res.get("refresh_token", "")
+                if new_refresh and new_refresh != _REFRESH_TOKEN:
+                    _REFRESH_TOKEN = new_refresh
+                    print("🔑 Refresh token baru — menyimpan ke GitHub Secrets...")
+                    save_secret_to_github("SHOPEE_REFRESH_TOKEN", new_refresh)
+                save_secret_to_github("SHOPEE_ACCESS_TOKEN", _ACCESS_TOKEN)
+                success = True
+                break
+        except Exception as e:
+            print(f"⚠️ Percobaan refresh gagal untuk payload {list(payload.keys())}: {e}")
+            
+    if not success:
+        print("❌ Seluruh opsi metode refresh token ditolak server Shopee. Periksa kecocokan ID di GitHub Secrets.")
 
 def shopee_post(path, payload, shop_id):
-    """Menggunakan Master Token secara dinamis ke target Toko Cabang"""
     ts    = int(time.time())
     base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{_ACCESS_TOKEN}{shop_id}"
     sign  = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
@@ -120,12 +126,9 @@ def shopee_post(path, payload, shop_id):
     try:
         r = requests.post(f"{SHOPEE_BASE_URL}{path}", params=params, json=payload, timeout=30)
         data = r.json()
-        
-        # PERBAIKAN LOGIKA ERROR: Mengembalikan dict kosong jika terdeteksi kegagalan otentikasi level atas
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
             return {}
-            
         return data if isinstance(data, dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
@@ -263,7 +266,6 @@ def boost_for_shop(shop_id, items):
     print(f"  📤 Menjalankan Boost {len(item_ids)} produk langsung via Master Token...")
     raw_res = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id)
     
-    # PERBAIKAN: Jika respons kosong akibat error token level atas, batalkan proses update Lark
     if not raw_res:
         print(f"  ❌ Gagal total eksekusi API untuk Toko {shop_id}. Lewati proses data.")
         return 0
@@ -304,7 +306,6 @@ def main():
         print("❌ LARK credentials tidak ada!")
         return
 
-    # Jalankan otomasi pembaruan Master Token induk via Merchant ID
     refresh_token()
     get_lark_token()
 
