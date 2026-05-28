@@ -1,4 +1,4 @@
-name: Zeodda Automation
+name: Daily Automation
 on:
   schedule:
     - cron: '0 20 * * *'  # Jam 03:00 WIB
@@ -28,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install requests
+        run: pip install requests PyNaCl
 
       - name: Run Daily Overview
         run: python scripts/zeodda_daily_overview.py
