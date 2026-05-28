@@ -5,6 +5,9 @@ import requests
 import os
 from datetime import datetime, timezone
 
+# ============================================================
+# CONFIG
+# ============================================================
 SHOPEE_PARTNER_ID    = int(os.environ.get("SHOPEE_PARTNER_ID") or "2035358")
 SHOPEE_PARTNER_KEY   = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
 SHOPEE_BASE_URL      = "https://partner.shopeemobile.com"
@@ -15,28 +18,35 @@ LARK_BASE_URL        = "https://open.larksuite.com"
 TABLE_BOOST          = "tblzcjLMZX2KZ4aW"
 GH_PAT               = os.environ.get("GH_PAT", "").strip()
 GH_REPO              = os.environ.get("GH_REPO", "").strip()
+MAIN_ACCOUNT_ID      = 1777961
 MAX_BOOST            = 5
 
 _ACCESS_TOKEN  = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
 _REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
 _lark_token    = None
 
+# ============================================================
+# GITHUB SECRET SAVE
+# ============================================================
 def save_secret_to_github(name, value):
     if not GH_PAT or not GH_REPO:
         return
     try:
         from nacl import encoding, public
         import base64
+
         r = requests.get(
             f"https://api.github.com/repos/{GH_REPO}/actions/secrets/public-key",
             headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
             timeout=10
         )
-        data      = r.json()
-        key_id    = data["key_id"]
-        pub_key   = data["key"]
+        data    = r.json()
+        key_id  = data["key_id"]
+        pub_key = data["key"]
+
         pk        = public.PublicKey(pub_key.encode(), encoding.Base64Encoder())
         encrypted = base64.b64encode(public.SealedBox(pk).encrypt(value.encode())).decode()
+
         r2 = requests.put(
             f"https://api.github.com/repos/{GH_REPO}/actions/secrets/{name}",
             headers={"Authorization": f"Bearer {GH_PAT}", "Accept": "application/vnd.github+json"},
@@ -50,7 +60,11 @@ def save_secret_to_github(name, value):
     except Exception as e:
         print(f"  ⚠️ save_secret error: {e}")
 
+# ============================================================
+# SHOPEE TOKEN AUTOMATION (SUB-ACCOUNT MODE)
+# ============================================================
 def refresh_token():
+    """Membuka akses Master Token menggunakan Main Account ID"""
     global _ACCESS_TOKEN, _REFRESH_TOKEN
     if not _REFRESH_TOKEN:
         return
@@ -61,19 +75,19 @@ def refresh_token():
         f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
         hashlib.sha256
     ).hexdigest()
+    
     try:
-        shop_ids_raw = os.environ.get("SHOPEE_SHOP_IDS", "").strip()
-        first_shop   = int(shop_ids_raw.split(",")[0].strip()) if shop_ids_raw else 963980234
-        r   = requests.post(
+        # Jalur Sub-Account WAJIB menggunakan main_account_id di payload body
+        r = requests.post(
             f"{SHOPEE_BASE_URL}{path}",
             params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
-            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "shop_id": first_shop},
+            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "main_account_id": MAIN_ACCOUNT_ID},
             timeout=30
         )
         res = r.json()
         if "access_token" in res:
             _ACCESS_TOKEN = res["access_token"]
-            print("🔄 Access token refreshed OK")
+            print("🔄 Master Access token refreshed OK")
             new_refresh = res.get("refresh_token", "")
             if new_refresh and new_refresh != _REFRESH_TOKEN:
                 _REFRESH_TOKEN = new_refresh
@@ -85,42 +99,16 @@ def refresh_token():
     except Exception as e:
         print(f"❌ Refresh error: {e}")
 
-def get_shop_token(shop_id):
-    """Tukar refresh token ke shop-specific access token."""
-    path = "/api/v2/auth/access_token/get"
-    ts   = int(time.time())
-    sign = hmac.new(
-        SHOPEE_PARTNER_KEY.encode(),
-        f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
-        hashlib.sha256
-    ).hexdigest()
-    try:
-        r   = requests.post(
-            f"{SHOPEE_BASE_URL}{path}",
-            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
-            json={"refresh_token": _REFRESH_TOKEN, "partner_id": SHOPEE_PARTNER_ID, "shop_id": shop_id},
-            timeout=30
-        )
-        res = r.json()
-        if "access_token" in res and res["access_token"]:
-            print(f"  🔑 Shop token OK untuk toko {shop_id}")
-            return res["access_token"]
-        else:
-            print(f"  ❌ Gagal get shop token {shop_id}: {res.get('error')} {res.get('message')}")
-            return None
-    except Exception as e:
-        print(f"  ❌ get_shop_token error: {e}")
-        return None
-
-def shopee_post(path, payload, shop_id, shop_token):
-    ts   = int(time.time())
-    base = f"{SHOPEE_PARTNER_ID}{path}{ts}{shop_token}{shop_id}"
-    sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
+def shopee_post(path, payload, shop_id):
+    """Menggunakan Master Token secara dinamis ke target Toko Cabang"""
+    ts    = int(time.time())
+    base  = f"{SHOPEE_PARTNER_ID}{path}{ts}{_ACCESS_TOKEN}{shop_id}"
+    sign  = hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
     params = {
         "partner_id":   SHOPEE_PARTNER_ID,
         "timestamp":    ts,
-        "access_token": shop_token,
-        "shop_id":      shop_id,
+        "access_token": _ACCESS_TOKEN,
+        "shop_id":      int(shop_id),
         "sign":         sign,
     }
     try:
@@ -133,6 +121,9 @@ def shopee_post(path, payload, shop_id, shop_token):
         print(f"  ❌ {path}: {e}")
         return {}
 
+# ============================================================
+# LARK
+# ============================================================
 def get_lark_token():
     global _lark_token
     if _lark_token:
@@ -171,8 +162,8 @@ def parse_text_field(val):
 def group_by_shop(items):
     groups = {}
     for item in items:
-        fields   = item.get("fields", {})
-        shop_raw = fields.get("Shop ID")
+        fields    = item.get("fields", {})
+        shop_raw  = fields.get("Shop ID")
         try:
             if isinstance(shop_raw, dict) and shop_raw.get("value"):
                 shop_id = int(shop_raw["value"][0])
@@ -190,9 +181,11 @@ def group_by_shop(items):
         if not shop_id:
             print(f"  ⚠️ Skip record tanpa Shop ID: {item.get('record_id')}")
             continue
+
         if shop_id not in groups:
             groups[shop_id] = []
         groups[shop_id].append(item)
+
     return groups
 
 def sort_candidates(items):
@@ -219,17 +212,12 @@ def update_boost_timestamp(record_id):
     result = r.json()
     if result.get("code") != 0:
         print(f"  ❌ Update timestamp gagal: {result.get('code')} {result.get('msg')}")
-    else:
-        print(f"  ✅ Timestamp updated")
 
+# ============================================================
+# BOOST PER TOKO
+# ============================================================
 def boost_for_shop(shop_id, items):
     print(f"\n🏪 Toko {shop_id} — {len(items)} produk aktif")
-
-    # Dapatkan shop-specific token dulu
-    shop_token = get_shop_token(shop_id)
-    if not shop_token:
-        print(f"  ❌ Skip toko {shop_id} — gagal get shop token")
-        return 0
 
     sorted_items = sort_candidates(items)
     to_boost     = sorted_items[:MAX_BOOST]
@@ -240,7 +228,8 @@ def boost_for_shop(shop_id, items):
     for c in to_boost:
         fields    = c.get("fields", {})
         record_id = c.get("record_id")
-        kode      = parse_text_field(fields.get("Kode Produk", ""))
+        kode_raw  = fields.get("Kode Produk", "")
+        kode      = parse_text_field(kode_raw)
 
         if not kode:
             print(f"  ⚠️ Skip — Kode Produk kosong")
@@ -261,25 +250,27 @@ def boost_for_shop(shop_id, items):
         print(f"  ⚠️ Tidak ada item valid untuk toko {shop_id}")
         return 0
 
-    print(f"\n  📤 Boost {len(item_ids)} produk untuk toko {shop_id}...")
-    resp       = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
-    failed     = resp.get("failed_list", [])
+    print(f"  📤 Menjalankan Boost {len(item_ids)} produk langsung via Master Token...")
+    resp   = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id)
+    failed = resp.get("failed_list", [])
     failed_ids = [f.get("item_id") for f in failed]
 
     if failed:
-        print(f"  ⚠️ Gagal boost: {failed}")
+        print(f"  ⚠️ Detail info pembatasan Shopee: {failed}")
 
     success_ids = [i for i in item_ids if i not in failed_ids]
     if success_ids:
         print(f"  ✅ Berhasil boost: {success_ids}")
-
-    for item_id in success_ids:
-        record_id = record_map.get(item_id)
-        if record_id:
-            update_boost_timestamp(record_id)
+        for item_id in success_ids:
+            record_id = record_map.get(item_id)
+            if record_id:
+                update_boost_timestamp(record_id)
 
     return len(success_ids)
 
+# ============================================================
+# MAIN
+# ============================================================
 def main():
     print("=" * 50)
     print("🚀 Naikkan Produk — START")
@@ -290,6 +281,7 @@ def main():
         print("❌ LARK credentials tidak ada!")
         return
 
+    # Jalankan otomasi pembaruan Master Token induk
     refresh_token()
     get_lark_token()
 
@@ -304,13 +296,14 @@ def main():
     total_success = 0
     for shop_id, items in shop_groups.items():
         result = boost_for_shop(shop_id, items)
-        total_success += result or 0
+        if result:
+            total_success += result
 
     print(f"\n{'='*50}")
     print(f"✅ Naikkan Produk — DONE")
-    print(f"   Total berhasil boost: {total_success} produk")
-    print(f"   Toko diproses: {len(shop_groups)}")
-    print(f"   Next run: ~4 jam lagi")
+    print(f"    Total berhasil boost: {total_success} produk")
+    print(f"    Toko diproses: {len(shop_groups)}")
+    print(f"    Next run: ~4 jam lagi")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
