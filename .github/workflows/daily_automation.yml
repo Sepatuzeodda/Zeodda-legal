@@ -1,7 +1,7 @@
 name: Zeodda Daily Automation
 on:
   schedule:
-    - cron: '0 17 * * *'  # Jam 00:00 WIB = 17:00 UTC
+    - cron: '0 20 * * *'  # Jam 03:00 WIB = 20:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -33,30 +33,21 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # ── SCRIPT BARU ────────────────────────────────────────
       - name: Daily Overview
         run: python scripts/zeodda_daily_overview.py
 
-      - name: Product Performance
-        if: success() || failure()  # tetap jalan meski step sebelumnya gagal
-        run: python scripts/zeodda_product_performance.py
+      # - name: Product Performance
+      #   run: python scripts/zeodda_product_performance.py
 
-      - name: Ads
-        if: success() || failure()
-        run: python scripts/zeodda_ads.py
+      # - name: Ads
+      #   run: python scripts/zeodda_ads.py
 
-      - name: Financial
-        if: success() || failure()
-        run: python scripts/zeodda_financial.py
+      # - name: Financial
+      #   run: python scripts/zeodda_financial.py
 
-      # ── LAMA (nonaktif dulu, hapus setelah semua tested) ───
-      # - name: Run Zeodda Automation (LAMA)
-      #   run: python scripts/zeodda_automation.py
-
-      # ── NOTIFIKASI ─────────────────────────────────────────
       - name: Notify success
         if: success()
-        run: echo "✅ Automation berhasil dijalankan pada $(date)"
+        run: echo "✅ Automation berhasil pada $(date)"
 
       - name: Notify failure
         if: failure()
