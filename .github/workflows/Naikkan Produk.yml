@@ -28,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests PyNaCl
 
       - name: Run Boost
         run: python scripts/Naikkan_Produk.py
