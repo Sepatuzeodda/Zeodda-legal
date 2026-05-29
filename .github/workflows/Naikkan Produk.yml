@@ -1,7 +1,7 @@
 name: Naikkan Produk Otomatis
 on:
   schedule:
-    - cron: '0 */4 * * *'  # Setiap 4 jam
+    - cron: '0 */2 * * *'  # Berjalan otomatis setiap 2 jam
   workflow_dispatch:
 
 jobs:
