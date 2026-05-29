@@ -1,8 +1,8 @@
 name: Naikkan Produk Otomatis
 on:
-  schedule:
-    - cron: '0 */2 * * *'  # Berjalan otomatis setiap 2 jam
-  workflow_dispatch:
+  repository_dispatch:
+    types: [pemicu_cron_eksternal]  # Mendengarkan tembakan dari cron-job.org
+  workflow_dispatch:                # Tombol manual di web GitHub tetap aktif
 
 jobs:
   run-boost:
