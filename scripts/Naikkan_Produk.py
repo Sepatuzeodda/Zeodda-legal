@@ -65,10 +65,9 @@ def save_secret_to_github(name, value):
         print(f"  ⚠️ save_secret error: {e}")
 
 # ============================================================
-# SHOPEE TOKEN
+# SHOPEE NETWORK METHODS (DENGAN FIX ERROR INTERCEPTOR)
 # ============================================================
 def get_active_token_for_shop(shop_id):
-    """Generate shop-specific access token dari refresh token."""
     global _GLOBAL_REFRESH_TOKEN
     env_key       = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
     local_refresh = os.environ.get(env_key, "").strip() or _GLOBAL_REFRESH_TOKEN
@@ -127,22 +126,11 @@ def shopee_get(path, shop_id, access_token, extra={}):
         data = r.json()
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
+            return None  # Intersepsi error root level, return None
         return data.get("response") if isinstance(data.get("response"), dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
-        return {}
-
-def check_cooldown(shop_id, access_token):
-    """
-    Cek sisa cooldown rentang waktu secara akurat dari list item aktif.
-    """
-    resp = shopee_get("/api/v2/product/get_boosted_list", shop_id, access_token)
-    item_list = resp.get("item_list", [])
-    
-    if item_list:
-        # Mengekstrak sisa detik cooldown tertinggi dari produk yang sedang aktif naik
-        return max([item.get("cool_down_time", 0) for item in item_list])
-    return 0
+        return None
 
 def shopee_post(path, payload, shop_id, access_token):
     ts   = int(time.time())
@@ -160,13 +148,33 @@ def shopee_post(path, payload, shop_id, access_token):
         data = r.json()
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
+            return None  # Intersepsi error root level, return None agar 'if not resp' bekerja
         return data.get("response") if isinstance(data.get("response"), dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
-        return {}
+        return None
+
+def check_cooldown(shop_id, access_token):
+    """
+    Cek sisa cooldown rentang waktu secara akurat dari list item aktif.
+    Mendukung format hitungan mundur detik maupun format masa depan timestamp.
+    """
+    resp = shopee_get("/api/v2/product/get_boosted_list", shop_id, access_token)
+    if not resp:
+        return 0
+        
+    item_list = resp.get("item_list", [])
+    if item_list:
+        max_cooldown = max([item.get("cool_down_time", 0) for item in item_list])
+        # Proteksi: Jika Shopee mengembalikan format Epoch Timestamp masa depan (> Tahun 2020)
+        if max_cooldown > 1577836800:
+            sisa_detik = max_cooldown - int(time.time())
+            return max(0, sisa_detik)
+        return max_cooldown
+    return 0
 
 # ============================================================
-# LARK
+# LARK INTERACTION
 # ============================================================
 def get_lark_token():
     global _lark_token
@@ -258,7 +266,7 @@ def update_boost_timestamp(record_id):
         print(f"  ✅ Timestamp updated")
 
 # ============================================================
-# BOOST PER TOKO
+# CORE TRANSACTION DISPATCHER
 # ============================================================
 def boost_for_shop(shop_id, items):
     print(f"\n🏪 Toko {shop_id} — {len(items)} produk aktif")
@@ -268,7 +276,6 @@ def boost_for_shop(shop_id, items):
         print(f"  ❌ Skip toko {shop_id} — Token tidak valid")
         return 0
 
-    # Cek kuota / cooldown riil sebelum boost
     sisa_detik = check_cooldown(shop_id, shop_token)
     sisa_menit = sisa_detik / 60
 
@@ -315,9 +322,9 @@ def boost_for_shop(shop_id, items):
     print(f"  📤 Boost {len(item_ids)} produk untuk toko {shop_id}...")
     resp       = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
     
-    # Proteksi jika respons kosong akibat batas slot Shopee tercapai (Menghindari False Positive)
-    if not resp:
-        print(f"  ❌ Gagal total melakukan boost untuk toko {shop_id} (Slot masih penuh/Eror API)")
+    # Intersepsi Jika API Mengembalikan Parameter Error (Bukan False Positive Lagi)
+    if resp is None:
+        print(f"  ❌ Gagal total melakukan boost untuk toko {shop_id} (Ditolak oleh Shopee / Slot Penuh)")
         return 0
 
     failed     = safe_list(resp, "failed_list")
@@ -337,7 +344,7 @@ def boost_for_shop(shop_id, items):
     return len(success_ids)
 
 # ============================================================
-# MAIN
+# MAIN APPLICATION ENTRY POINT
 # ============================================================
 def main():
     print("=" * 50)
