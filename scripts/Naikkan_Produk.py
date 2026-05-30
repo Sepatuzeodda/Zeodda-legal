@@ -134,13 +134,15 @@ def shopee_get(path, shop_id, access_token, extra={}):
 
 def check_cooldown(shop_id, access_token):
     """
-    Cek sisa cooldown boost dari get_boosted_list.
-    Return: sisa detik cooldown (0 = slot kosong/siap boost)
+    Cek sisa cooldown rentang waktu secara akurat dari list item aktif.
     """
     resp = shopee_get("/api/v2/product/get_boosted_list", shop_id, access_token)
-    # cool_down_time dalam detik
-    sisa_detik = resp.get("cool_down_time", 0) or 0
-    return int(sisa_detik)
+    item_list = resp.get("item_list", [])
+    
+    if item_list:
+        # Mengekstrak sisa detik cooldown tertinggi dari produk yang sedang aktif naik
+        return max([item.get("cool_down_time", 0) for item in item_list])
+    return 0
 
 def shopee_post(path, payload, shop_id, access_token):
     ts   = int(time.time())
@@ -158,7 +160,6 @@ def shopee_post(path, payload, shop_id, access_token):
         data = r.json()
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
-        # Return response object langsung
         return data.get("response") if isinstance(data.get("response"), dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
@@ -267,6 +268,20 @@ def boost_for_shop(shop_id, items):
         print(f"  ❌ Skip toko {shop_id} — Token tidak valid")
         return 0
 
+    # Cek kuota / cooldown riil sebelum boost
+    sisa_detik = check_cooldown(shop_id, shop_token)
+    sisa_menit = sisa_detik / 60
+
+    if sisa_detik > 0:
+        if sisa_menit <= 5:
+            jeda_keamanan = sisa_detik + 5
+            print(f"  ⏳ Slot hampir habis ({sisa_menit:.1f} menit) — tunggu {jeda_keamanan} detik...")
+            time.sleep(jeda_keamanan)
+            print(f"  🚀 Lanjut boost setelah tunggu!")
+        else:
+            print(f"  ⏩ Skip toko {shop_id} — slot masih aktif {sisa_menit/60:.1f} jam lagi")
+            return 0
+
     sorted_items = sort_candidates(items)
     to_boost     = sorted_items[:MAX_BOOST]
 
@@ -297,30 +312,23 @@ def boost_for_shop(shop_id, items):
         print(f"  ⚠️ Tidak ada item valid untuk toko {shop_id}")
         return 0
 
-    # Cek cooldown sebelum boost
-    sisa_detik = check_cooldown(shop_id, shop_token)
-    sisa_menit = sisa_detik / 60
-
-    if sisa_detik > 0:
-        if sisa_menit <= 5:
-            print(f"  ⏳ Slot hampir habis ({sisa_menit:.1f} menit) — tunggu {sisa_detik+5} detik...")
-            time.sleep(sisa_detik + 5)
-            print(f"  🚀 Lanjut boost setelah tunggu!")
-        else:
-            print(f"  ⏩ Skip toko {shop_id} — slot masih aktif {sisa_menit/60:.1f} jam lagi")
-            return 0
-
     print(f"  📤 Boost {len(item_ids)} produk untuk toko {shop_id}...")
     resp       = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
+    
+    # Proteksi jika respons kosong akibat batas slot Shopee tercapai (Menghindari False Positive)
+    if not resp:
+        print(f"  ❌ Gagal total melakukan boost untuk toko {shop_id} (Slot masih penuh/Eror API)")
+        return 0
+
     failed     = safe_list(resp, "failed_list")
     failed_ids = [f.get("item_id") for f in failed]
 
     if failed_ids:
-        print(f"  ⚠️ Gagal boost: {failed_ids}")
+        print(f"  ⚠️ Gagal boost produk tertentu: {failed_ids}")
 
     success_ids = [i for i in item_ids if i not in failed_ids]
     if success_ids:
-        print(f"  ✅ Berhasil boost: {success_ids}")
+        print(f"  ✅ Berhasil boost ke Shopee: {success_ids}")
         for item_id in success_ids:
             record_id = record_map.get(item_id)
             if record_id:
@@ -358,9 +366,9 @@ def main():
 
     print(f"\n{'='*50}")
     print(f"✅ Naikkan Produk — DONE")
-    print(f"   Total berhasil boost: {total_success} produk")
-    print(f"   Toko diproses: {len(shop_groups)}")
-    print(f"   Next run: ~4 jam lagi")
+    print(f"    Total berhasil boost: {total_success} produk")
+    print(f"    Toko diproses: {len(shop_groups)}")
+    print(f"    Next run: ~4 jam lagi")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
