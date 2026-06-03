@@ -1,0 +1,44 @@
+name: Zeodda Pull Daily Ads Performance
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-zeodda-ads]
+
+jobs:
+  run-ads-automation:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Set Up Python 3.11 Environment
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    - name: Execute Pull Ads Performance Script
+      env:
+        SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
+        SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
+        LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+        LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        SHOPEE_REFRESH_TOKEN: ${{ secrets.SHOPEE_REFRESH_TOKEN }}
+        # Pemetaan 8 Kunci Token Cabang Sesuai Gambar Kredensial Anda
+        SHOPEE_REFRESH_TOKEN_1101111522: ${{ secrets.SHOPEE_REFRESH_TOKEN_1101111522 }}
+        SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
+        SHOPEE_REFRESH_TOKEN_867817945: ${{ secrets.SHOPEE_REFRESH_TOKEN_867817945 }}
+        SHOPEE_REFRESH_TOKEN_899095041: ${{ secrets.SHOPEE_REFRESH_TOKEN_899095041 }}
+        SHOPEE_REFRESH_TOKEN_963980234: ${{ secrets.SHOPEE_REFRESH_TOKEN_963980234 }}
+        SHOPEE_REFRESH_TOKEN_963990340: ${{ secrets.SHOPEE_REFRESH_TOKEN_963990340 }}
+        SHOPEE_REFRESH_TOKEN_967593785: ${{ secrets.SHOPEE_REFRESH_TOKEN_967593785 }}
+        SHOPEE_REFRESH_TOKEN_981846983: ${{ secrets.SHOPEE_REFRESH_TOKEN_981846983 }}
+      run: |
+        python scripts/zeodda_ads_performance.py
