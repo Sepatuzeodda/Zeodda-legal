@@ -5,9 +5,6 @@ import requests
 import os
 from datetime import datetime, timezone
 
-# ============================================================
-# CONFIG
-# ============================================================
 SHOPEE_PARTNER_ID     = int(os.environ.get("SHOPEE_PARTNER_ID") or "2035358")
 SHOPEE_PARTNER_KEY    = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
 SHOPEE_BASE_URL       = "https://partner.shopeemobile.com"
@@ -23,18 +20,12 @@ MAX_BOOST             = 5
 _GLOBAL_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
 _lark_token           = None
 
-# ============================================================
-# SAFE HELPERS
-# ============================================================
 def safe_list(d, key):
     if not isinstance(d, dict):
         return []
     v = d.get(key, [])
     return v if isinstance(v, list) else []
 
-# ============================================================
-# GITHUB SECRET SAVE
-# ============================================================
 def save_secret_to_github(name, value):
     if not GH_PAT or not GH_REPO:
         return
@@ -64,9 +55,6 @@ def save_secret_to_github(name, value):
     except Exception as e:
         print(f"  ⚠️ save_secret error: {e}")
 
-# ============================================================
-# SHOPEE NETWORK METHODS (DENGAN FIX ERROR INTERCEPTOR)
-# ============================================================
 def get_active_token_for_shop(shop_id):
     global _GLOBAL_REFRESH_TOKEN
     env_key       = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
@@ -78,11 +66,7 @@ def get_active_token_for_shop(shop_id):
 
     path = "/api/v2/auth/access_token/get"
     ts   = int(time.time())
-    sign = hmac.new(
-        SHOPEE_PARTNER_KEY.encode(),
-        f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(),
-        hashlib.sha256
-    ).hexdigest()
+    sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), f"{SHOPEE_PARTNER_ID}{path}{ts}".encode(), hashlib.sha256).hexdigest()
 
     try:
         r = requests.post(
@@ -126,7 +110,7 @@ def shopee_get(path, shop_id, access_token, extra={}):
         data = r.json()
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
-            return None  # Intersepsi error root level, return None
+            return None
         return data.get("response") if isinstance(data.get("response"), dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
@@ -148,43 +132,34 @@ def shopee_post(path, payload, shop_id, access_token):
         data = r.json()
         if data.get("error") and data.get("error") != "":
             print(f"  ⚠️ [{path}] {data.get('error')}: {data.get('message','')[:80]}")
-            return None  # Intersepsi error root level, return None agar 'if not resp' bekerja
+            return None
         return data.get("response") if isinstance(data.get("response"), dict) else {}
     except Exception as e:
         print(f"  ❌ {path}: {e}")
         return None
 
 def check_cooldown(shop_id, access_token):
-    """
-    Cek sisa cooldown rentang waktu secara akurat dari list item aktif.
-    Mendukung format hitungan mundur detik maupun format masa depan timestamp.
-    """
     resp = shopee_get("/api/v2/product/get_boosted_list", shop_id, access_token)
     if not resp:
         return 0
-        
-    item_list = resp.get("item_list", [])
+    
+    # REVISI KRUSIAL: Shopee v2 mengembalikan list dalam key 'item', kita amankan dengan fallback ke 'item_list'
+    item_list = resp.get("item", []) or resp.get("item_list", [])
+    
     if item_list:
-        max_cooldown = max([item.get("cool_down_time", 0) for item in item_list])
-        # Proteksi: Jika Shopee mengembalikan format Epoch Timestamp masa depan (> Tahun 2020)
+        # Amankan pembacaan key parameter waktu cooldown (antisipasi jika tanpa underscore)
+        max_cooldown = max([item.get("cool_down_time") or item.get("cooldown_time") or 0 for item in item_list])
         if max_cooldown > 1577836800:
             sisa_detik = max_cooldown - int(time.time())
             return max(0, sisa_detik)
         return max_cooldown
     return 0
 
-# ============================================================
-# LARK INTERACTION
-# ============================================================
 def get_lark_token():
     global _lark_token
     if _lark_token:
         return _lark_token
-    r = requests.post(
-        f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal",
-        json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET},
-        timeout=30
-    )
+    r = requests.post(f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal", json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
     _lark_token = r.json().get("tenant_access_token")
     print("✅ Lark token OK")
     return _lark_token
@@ -193,14 +168,7 @@ def lark_headers():
     return {"Authorization": f"Bearer {get_lark_token()}", "Content-Type": "application/json"}
 
 def get_boost_candidates():
-    r = requests.post(
-        f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_BOOST}/records/search",
-        headers=lark_headers(),
-        json={"filter": {"conjunction": "and", "conditions": [
-            {"field_name": "Aktifkan Boost", "operator": "is", "value": ["true"]}
-        ]}},
-        timeout=30
-    )
+    r = requests.post(f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_BOOST}/records/search", headers=lark_headers(), json={"filter": {"conjunction": "and", "conditions": [{"field_name": "Aktifkan Boost", "operator": "is", "value": ["true"]}]}}, timeout=30)
     data  = r.json()
     items = data.get("data", {}).get("items", [])
     print(f"📋 Total produk aktif boost: {len(items)}")
@@ -231,7 +199,6 @@ def group_by_shop(items):
             shop_id = None
 
         if not shop_id:
-            print(f"  ⚠️ Skip record tanpa Shop ID: {item.get('record_id')}")
             continue
         if shop_id not in groups:
             groups[shop_id] = []
@@ -253,27 +220,17 @@ def sort_candidates(items):
 
 def update_boost_timestamp(record_id):
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    r = requests.put(
-        f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_BOOST}/records/{record_id}",
-        headers=lark_headers(),
-        json={"fields": {"Terakhir Di-Boost": now_ms}},
-        timeout=30
-    )
+    r = requests.put(f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{TABLE_BOOST}/records/{record_id}", headers=lark_headers(), json={"fields": {"Terakhir Di-Boost": now_ms}}, timeout=30)
     result = r.json()
     if result.get("code") != 0:
         print(f"  ❌ Update timestamp gagal: {result.get('code')} {result.get('msg')}")
     else:
         print(f"  ✅ Timestamp updated")
 
-# ============================================================
-# CORE TRANSACTION DISPATCHER
-# ============================================================
 def boost_for_shop(shop_id, items):
     print(f"\n🏪 Toko {shop_id} — {len(items)} produk aktif")
-
     shop_token = get_active_token_for_shop(shop_id)
     if not shop_token:
-        print(f"  ❌ Skip toko {shop_id} — Token tidak valid")
         return 0
 
     sisa_detik = check_cooldown(shop_id, shop_token)
@@ -284,14 +241,12 @@ def boost_for_shop(shop_id, items):
             jeda_keamanan = sisa_detik + 5
             print(f"  ⏳ Slot hampir habis ({sisa_menit:.1f} menit) — tunggu {jeda_keamanan} detik...")
             time.sleep(jeda_keamanan)
-            print(f"  🚀 Lanjut boost setelah tunggu!")
         else:
-            print(f"  ⏩ Skip toko {shop_id} — slot masih aktif {sisa_menit/60:.1f} jam lagi")
+            print(f"  ⏩ Skip toko {shop_id} — slot masih aktif")
             return 0
 
     sorted_items = sort_candidates(items)
     to_boost     = sorted_items[:MAX_BOOST]
-
     item_ids   = []
     record_map = {}
 
@@ -299,84 +254,44 @@ def boost_for_shop(shop_id, items):
         fields    = c.get("fields", {})
         record_id = c.get("record_id")
         kode      = parse_text_field(fields.get("Kode Produk", ""))
-
-        if not kode:
-            print(f"  ⚠️ Skip — Kode Produk kosong")
-            continue
-        try:
-            item_id = int(kode)
-        except ValueError:
-            print(f"  ⚠️ Skip — Kode '{kode}' bukan angka valid")
-            continue
-
-        prioritas  = fields.get("Prioritas", "-")
-        last_boost = fields.get("Terakhir Di-Boost", "belum pernah")
-        print(f"  • {kode} | Prioritas: {prioritas} | Terakhir: {last_boost}")
+        if not kode: continue
+        try: item_id = int(kode)
+        except ValueError: continue
         item_ids.append(item_id)
         record_map[item_id] = record_id
 
-    if not item_ids:
-        print(f"  ⚠️ Tidak ada item valid untuk toko {shop_id}")
-        return 0
+    if not item_ids: return 0
 
-    print(f"  📤 Boost {len(item_ids)} produk untuk toko {shop_id}...")
+    print(f"  📤 Boost {len(item_ids)} produk...")
     resp       = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
     
-    # Intersepsi Jika API Mengembalikan Parameter Error (Bukan False Positive Lagi)
     if resp is None:
-        print(f"  ❌ Gagal total melakukan boost untuk toko {shop_id} (Ditolak oleh Shopee / Slot Penuh)")
+        print(f"  ❌ Gagal total (Ditolak oleh Shopee / Slot Penuh)")
         return 0
 
     failed     = safe_list(resp, "failed_list")
     failed_ids = [f.get("item_id") for f in failed]
-
-    if failed_ids:
-        print(f"  ⚠️ Gagal boost produk tertentu: {failed_ids}")
-
     success_ids = [i for i in item_ids if i not in failed_ids]
+    
     if success_ids:
         print(f"  ✅ Berhasil boost ke Shopee: {success_ids}")
         for item_id in success_ids:
             record_id = record_map.get(item_id)
-            if record_id:
-                update_boost_timestamp(record_id)
-
+            if record_id: update_boost_timestamp(record_id)
     return len(success_ids)
 
-# ============================================================
-# MAIN APPLICATION ENTRY POINT
-# ============================================================
 def main():
-    print("=" * 50)
     print("🚀 Naikkan Produk — START")
-    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print("=" * 50)
-
-    if not LARK_APP_ID or not LARK_APP_SECRET:
-        print("❌ LARK credentials tidak ada!")
-        return
-
+    if not LARK_APP_ID or not LARK_APP_SECRET: return
     get_lark_token()
-
     candidates = get_boost_candidates()
-    if not candidates:
-        print("⚠️ Tidak ada produk yang diaktifkan untuk boost.")
-        return
-
+    if not candidates: return
     shop_groups = group_by_shop(candidates)
-    print(f"\n🏪 Total toko yang akan di-boost: {len(shop_groups)}")
-
     total_success = 0
     for shop_id, items in shop_groups.items():
         result = boost_for_shop(shop_id, items)
         total_success += result or 0
-
-    print(f"\n{'='*50}")
-    print(f"✅ Naikkan Produk — DONE")
-    print(f"    Total berhasil boost: {total_success} produk")
-    print(f"    Toko diproses: {len(shop_groups)}")
-    print(f"    Next run: ~4 jam lagi")
-    print(f"{'='*50}")
+    print(f"✅ Naikkan Produk — DONE. Total sukses: {total_success}")
 
 if __name__ == "__main__":
     main()
