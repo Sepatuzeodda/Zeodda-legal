@@ -142,12 +142,8 @@ def check_cooldown(shop_id, access_token):
     resp = shopee_get("/api/v2/product/get_boosted_list", shop_id, access_token)
     if not resp:
         return 0
-    
-    # REVISI KRUSIAL: Shopee v2 mengembalikan list dalam key 'item', kita amankan dengan fallback ke 'item_list'
     item_list = resp.get("item", []) or resp.get("item_list", [])
-    
     if item_list:
-        # Amankan pembacaan key parameter waktu cooldown (antisipasi jika tanpa underscore)
         max_cooldown = max([item.get("cool_down_time") or item.get("cooldown_time") or 0 for item in item_list])
         if max_cooldown > 1577836800:
             sisa_detik = max_cooldown - int(time.time())
@@ -236,14 +232,10 @@ def boost_for_shop(shop_id, items):
     sisa_detik = check_cooldown(shop_id, shop_token)
     sisa_menit = sisa_detik / 60
 
+    # REVISI: Singkirkan fitur sleep bawaan lama untuk menghemat kuota billing GitHub Actions
     if sisa_detik > 0:
-        if sisa_menit <= 5:
-            jeda_keamanan = sisa_detik + 5
-            print(f"  ⏳ Slot hampir habis ({sisa_menit:.1f} menit) — tunggu {jeda_keamanan} detik...")
-            time.sleep(jeda_keamanan)
-        else:
-            print(f"  ⏩ Skip toko {shop_id} — slot masih aktif")
-            return 0
+        print(f"  ⏩ Skip toko {shop_id} — slot masih aktif berjalan ({sisa_menit:.1f} menit tersisa)")
+        return 0
 
     sorted_items = sort_candidates(items)
     to_boost     = sorted_items[:MAX_BOOST]
