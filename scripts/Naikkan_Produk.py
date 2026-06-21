@@ -13,6 +13,7 @@ LARK_APP_SECRET       = os.environ.get("LARK_APP_SECRET", "")
 LARK_APP_TOKEN        = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
 LARK_BASE_URL         = "https://open.larksuite.com"
 TABLE_BOOST           = "tblzcjLMZX2KZ4aW"
+LARK_TOKEN_TABLE_ID   = os.environ.get("LARK_TOKEN_TABLE_ID", "tbl8IOMhI1XaBIez").strip()
 GH_PAT                = os.environ.get("GH_PAT", "").strip()
 GH_REPO               = os.environ.get("GH_REPO", "").strip()
 MAX_BOOST             = 5
@@ -55,6 +56,52 @@ def save_secret_to_github(name, value):
     except Exception as e:
         print(f"  ⚠️ save_secret error: {e}")
 
+def save_token_to_lark(shop_id: int, refresh_token: str) -> None:
+    """Simpan refresh token ke Lark Token Store setelah rotate."""
+    if not LARK_TOKEN_TABLE_ID:
+        return
+    try:
+        # Cari record yang punya Shop ID ini
+        r = requests.post(
+            f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TOKEN_TABLE_ID}/records/search",
+            headers=lark_headers(),
+            json={
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [
+                        {"field_name": "Shop ID", "operator": "is", "value": [str(int(shop_id))]}
+                    ]
+                },
+                "page_size": 1
+            },
+            timeout=10
+        )
+        data  = r.json()
+        items = data.get("data", {}).get("items", [])
+
+        fields = {
+            "Refresh Token":    refresh_token,
+            "Token Last Update": int(time.time() * 1000),
+        }
+
+        if items:
+            record_id = items[0]["record_id"]
+            r2 = requests.put(
+                f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TOKEN_TABLE_ID}/records/{record_id}",
+                headers=lark_headers(),
+                json={"fields": fields},
+                timeout=10
+            )
+            if r2.json().get("code") == 0:
+                print(f"  ✅ Refresh token toko {shop_id} tersimpan ke Lark")
+            else:
+                print(f"  ⚠️ Lark update gagal: {r2.json().get('msg')}")
+        else:
+            print(f"  ⚠️ Toko {shop_id} tidak ditemukan di Lark Token Store — skip")
+    except Exception as e:
+        # Jangan sampai error Lark menghentikan proses boost
+        print(f"  ⚠️ save_token_to_lark error toko {shop_id}: {e}")
+
 def get_active_token_for_shop(shop_id):
     global _GLOBAL_REFRESH_TOKEN
     env_key       = f"SHOPEE_REFRESH_TOKEN_{shop_id}"
@@ -84,6 +131,8 @@ def get_active_token_for_shop(shop_id):
                 save_secret_to_github(secret_name, new_refresh)
                 save_secret_to_github("SHOPEE_ACCESS_TOKEN", res["access_token"])
                 _GLOBAL_REFRESH_TOKEN = new_refresh
+                # ── TAMBAHAN: simpan ke Lark supaya HTML tool bisa sync ──
+                save_token_to_lark(shop_id, new_refresh)
             print(f"  🔑 Shop token OK untuk toko {shop_id}")
             return res["access_token"]
         else:
@@ -232,7 +281,6 @@ def boost_for_shop(shop_id, items):
     sisa_detik = check_cooldown(shop_id, shop_token)
     sisa_menit = sisa_detik / 60
 
-    # REVISI: Singkirkan fitur sleep bawaan lama untuk menghemat kuota billing GitHub Actions
     if sisa_detik > 0:
         print(f"  ⏩ Skip toko {shop_id} — slot masih aktif berjalan ({sisa_menit:.1f} menit tersisa)")
         return 0
@@ -255,16 +303,16 @@ def boost_for_shop(shop_id, items):
     if not item_ids: return 0
 
     print(f"  📤 Boost {len(item_ids)} produk...")
-    resp       = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
-    
+    resp = shopee_post("/api/v2/product/boost_item", {"item_id_list": item_ids}, shop_id, shop_token)
+
     if resp is None:
         print(f"  ❌ Gagal total (Ditolak oleh Shopee / Slot Penuh)")
         return 0
 
-    failed     = safe_list(resp, "failed_list")
-    failed_ids = [f.get("item_id") for f in failed]
+    failed      = safe_list(resp, "failed_list")
+    failed_ids  = [f.get("item_id") for f in failed]
     success_ids = [i for i in item_ids if i not in failed_ids]
-    
+
     if success_ids:
         print(f"  ✅ Berhasil boost ke Shopee: {success_ids}")
         for item_id in success_ids:
