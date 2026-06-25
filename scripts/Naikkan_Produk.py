@@ -27,6 +27,33 @@ def safe_list(d, key):
     v = d.get(key, [])
     return v if isinstance(v, list) else []
 
+def parse_shop_id(raw):
+    """Parse Shop ID dari berbagai format Lark (Number, Text, Lookup→Number, Lookup→Text)."""
+    if raw is None:
+        return None
+    try:
+        # Lookup field: {"type": 2, "value": [...]}
+        if isinstance(raw, dict) and raw.get("value"):
+            v0 = raw["value"][0]
+            if isinstance(v0, dict):
+                return int(str(v0.get("text", "")).strip())
+            return int(str(v0).strip())
+        # Number langsung
+        if isinstance(raw, (int, float)) and raw:
+            return int(raw)
+        # String "867817945"
+        if isinstance(raw, str) and raw.strip().isdigit():
+            return int(raw.strip())
+        # Text field: [{"text": "867817945", "type": "text"}]
+        if isinstance(raw, list) and raw:
+            v0 = raw[0]
+            if isinstance(v0, dict):
+                return int(str(v0.get("text", "")).strip())
+            return int(str(v0).strip())
+    except Exception:
+        return None
+    return None
+
 def save_secret_to_github(name, value):
     if not GH_PAT or not GH_REPO:
         return
@@ -61,7 +88,7 @@ def save_token_to_lark(shop_id: int, refresh_token: str) -> None:
     if not LARK_TOKEN_TABLE_ID:
         return
     try:
-        # Cari record yang punya Shop ID ini
+        # Shop ID di Token Store sekarang Text → query pakai string
         r = requests.post(
             f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TOKEN_TABLE_ID}/records/search",
             headers=lark_headers(),
@@ -80,7 +107,7 @@ def save_token_to_lark(shop_id: int, refresh_token: str) -> None:
         items = data.get("data", {}).get("items", [])
 
         fields = {
-            "Refresh Token":    refresh_token,
+            "Refresh Token":     refresh_token,
             "Token Last Update": int(time.time() * 1000),
         }
 
@@ -99,7 +126,6 @@ def save_token_to_lark(shop_id: int, refresh_token: str) -> None:
         else:
             print(f"  ⚠️ Toko {shop_id} tidak ditemukan di Lark Token Store — skip")
     except Exception as e:
-        # Jangan sampai error Lark menghentikan proses boost
         print(f"  ⚠️ save_token_to_lark error toko {shop_id}: {e}")
 
 def get_active_token_for_shop(shop_id):
@@ -131,7 +157,6 @@ def get_active_token_for_shop(shop_id):
                 save_secret_to_github(secret_name, new_refresh)
                 save_secret_to_github("SHOPEE_ACCESS_TOKEN", res["access_token"])
                 _GLOBAL_REFRESH_TOKEN = new_refresh
-                # ── TAMBAHAN: simpan ke Lark supaya HTML tool bisa sync ──
                 save_token_to_lark(shop_id, new_refresh)
             print(f"  🔑 Shop token OK untuk toko {shop_id}")
             return res["access_token"]
@@ -225,29 +250,16 @@ def parse_text_field(val):
     return str(val).strip() if val else ""
 
 def group_by_shop(items):
-    groups = {}
+    groups  = {}
+    skipped = 0
     for item in items:
-        fields   = item.get("fields", {})
-        shop_raw = fields.get("Shop ID")
-        try:
-            if isinstance(shop_raw, dict) and shop_raw.get("value"):
-                shop_id = int(shop_raw["value"][0])
-            elif isinstance(shop_raw, (int, float)) and shop_raw:
-                shop_id = int(shop_raw)
-            elif isinstance(shop_raw, str) and shop_raw.strip().isdigit():
-                shop_id = int(shop_raw.strip())
-            elif isinstance(shop_raw, list) and shop_raw:
-                shop_id = int(str(shop_raw[0].get("text", "")).strip())
-            else:
-                shop_id = None
-        except Exception:
-            shop_id = None
-
+        fields  = item.get("fields", {})
+        shop_id = parse_shop_id(fields.get("Shop ID"))
         if not shop_id:
+            skipped += 1
             continue
-        if shop_id not in groups:
-            groups[shop_id] = []
-        groups[shop_id].append(item)
+        groups.setdefault(shop_id, []).append(item)
+    print(f"  📊 group_by_shop: {len(groups)} toko, {skipped} record di-skip")
     return groups
 
 def sort_candidates(items):
