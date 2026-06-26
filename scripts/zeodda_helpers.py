@@ -103,8 +103,6 @@ def refresh_shopee_token():
         if "access_token" in res_data:
             _SHOPEE_ACTIVE_TOKEN = res_data["access_token"]
             print(f"🔄 [REFRESH] Sukses memperbarui Access Token Shopee untuk sesi ini.")
-            # Note: Idealnya refresh_token baru yang ada di res_data["refresh_token"] disimpan kembali,
-            # namun untuk GitHub Actions runner lama, refresh_token ini tetap valid digunakan selama 30 hari.
         else:
             print(f"❌ [REFRESH] Gagal refresh token: {res_data.get('error')} - {res_data.get('message')}")
     except Exception as e:
@@ -195,3 +193,79 @@ def lark_init():
     if not LARK_APP_ID or not LARK_APP_SECRET:
         raise Exception("❌ LARK_APP_ID atau LARK_APP_SECRET tidak ada!")
     get_lark_tenant_token()
+
+# =========================================================================
+# SYSTEM CLOUDFLARE KV: SINKRONISASI TOKEN OTOMATIS (LIVE TRACKER)
+# =========================================================================
+_synced_tokens = {}
+_orig_post = requests.post
+_orig_get = requests.get
+
+def _sync_to_cf(shop_id, token):
+    shop_id = str(shop_id).strip()
+    token = str(token).strip()
+    if not shop_id or not token: return
+    
+    # Mencegah spam (Hanya tembak Cloudflare 1x per toko di setiap sesi)
+    if _synced_tokens.get(shop_id) == token: return
+        
+    try:
+        cf_id = os.environ.get("CF_ACCOUNT_ID")
+        cf_ns = os.environ.get("CF_KV_NAMESPACE")
+        cf_token = os.environ.get("CF_API_TOKEN")
+        
+        if cf_id and cf_ns and cf_token:
+            cf_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}"
+            cf_headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "text/plain"}
+            # Menggunakan requests.put asli agar tidak masuk ke loop
+            res = requests.put(cf_url, headers=cf_headers, data=token, timeout=15)
+            if res.status_code == 200:
+                _synced_tokens[shop_id] = token
+                print(f"✅ [CLOUDFLARE] Token toko {shop_id} diamankan ke KV!")
+            else:
+                print(f"❌ [CLOUDFLARE] Gagal sinkron toko {shop_id}: {res.text}")
+    except Exception as e: 
+        print(f"❌ [CLOUDFLARE] Error jaringan KV: {e}")
+
+def _hook_post(*args, **kwargs):
+    # Sadap token dari request sebelum dikirim (saat script memanggil Shopee API misal: boost_item)
+    try:
+        params = kwargs.get("params", {})
+        if isinstance(params, dict) and "access_token" in params and "shop_id" in params:
+            _sync_to_cf(params["shop_id"], params["access_token"])
+    except: pass
+
+    res = _orig_post(*args, **kwargs)
+
+    # Sadap token baru dari response jika script berhasil melakukan Refresh Token
+    try:
+        url = args[0] if args else kwargs.get("url", "")
+        if "access_token/get" in str(url):
+            data = res.json()
+            token = data.get("access_token")
+            if not token and isinstance(data.get("response"), dict):
+                token = data["response"].get("access_token")
+            
+            shop_id = None
+            if 'json' in kwargs and isinstance(kwargs['json'], dict):
+                shop_id = kwargs['json'].get("shop_id")
+            
+            if token and shop_id:
+                _sync_to_cf(shop_id, token)
+    except: pass
+    return res
+
+def _hook_get(*args, **kwargs):
+    # Sadap token dari request GET
+    try:
+        params = kwargs.get("params", {})
+        if isinstance(params, dict) and "access_token" in params and "shop_id" in params:
+            _sync_to_cf(params["shop_id"], params["access_token"])
+    except: pass
+    return _orig_get(*args, **kwargs)
+
+# Membajak secara halus fungsi library requests
+# Siapapun (Naikkan_Produk.py atau zeodda_helpers) yang melakukan hit ke internet pasti kena sadap
+requests.post = _hook_post
+requests.get = _hook_get
+# =========================================================================
