@@ -1,8 +1,8 @@
 name: Naikkan Produk Otomatis
 on:
   repository_dispatch:
-    types: [pemicu_cron_eksternal]  # Mendengarkan tembakan dari cron-job.org
-  workflow_dispatch:                # Tombol manual di web GitHub tetap aktif
+    types: [pemicu_cron_eksternal]
+  workflow_dispatch:
 
 jobs:
   run-boost:
@@ -14,7 +14,6 @@ jobs:
       SHOPEE_ACCESS_TOKEN:   ${{ secrets.SHOPEE_ACCESS_TOKEN }}
       SHOPEE_REFRESH_TOKEN:  ${{ secrets.SHOPEE_REFRESH_TOKEN }}
       
-      # Pemetaan 8 Kunci Toko Cabang Secara Lengkap
       SHOPEE_REFRESH_TOKEN_1101111522: ${{ secrets.SHOPEE_REFRESH_TOKEN_1101111522 }}
       SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
       SHOPEE_REFRESH_TOKEN_867817945:  ${{ secrets.SHOPEE_REFRESH_TOKEN_867817945 }}
@@ -29,6 +28,11 @@ jobs:
       GH_PAT:                ${{ secrets.GH_PAT }}
       GH_REPO:               ${{ github.repository }}
 
+      # Kredensial Cloudflare (Disiapkan untuk dibaca Python)
+      CF_ACCOUNT_ID:         ${{ secrets.CF_ACCOUNT_ID }}
+      CF_KV_NAMESPACE:       ${{ secrets.CF_KV_NAMESPACE }}
+      CF_API_TOKEN:          ${{ secrets.CF_API_TOKEN }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -41,126 +45,8 @@ jobs:
       - name: Install dependencies
         run: pip install requests PyNaCl
 
-      # STEP UTAMA: Menyadap request/response secara mendalam menggunakan Deep Recursive Scan
-      - name: Inject Token Interceptor
-        run: |
-          cat << 'EOF' > interceptor.py
-          import requests
-          import json
-          import os
-          import urllib.parse as urlparse
-
-          cache_file = 'cf_tokens_cache.json'
-
-          def save_token(shop_id, token):
-              if not shop_id or not token: return
-              try:
-                  with open(cache_file, 'r') as f: data = json.load(f)
-              except: data = {}
-              data[str(shop_id)] = str(token)
-              with open(cache_file, 'w') as f: json.dump(data, f)
-
-          # Fungsi pemindai rekursif untuk membongkar objek JSON Shopee v2 secara total
-          def scan_and_extract(payload):
-              if not isinstance(payload, dict): return
-              
-              # Pola 1: Jika access_token dan shop_id berada di level yang sama (misal di dalam objek 'response')
-              if 'access_token' in payload and 'shop_id' in payload:
-                  save_token(payload.get('shop_id'), payload.get('access_token'))
-                  
-              # Pola 2: Standard Shopee API v2 wrapper check
-              if 'response' in payload and isinstance(payload['response'], dict):
-                  resp = payload['response']
-                  if 'access_token' in resp:
-                      save_token(resp.get('shop_id') or resp.get('partner_id'), resp.get('access_token'))
-                      
-              # Telusuri seluruh cabang dictionary secara rekursif jika ada payload bercabang lain
-              for k, v in payload.items():
-                  if isinstance(v, dict):
-                      scan_and_extract(v)
-
-          # LAYER 1: Sadap Outbound Request (Menangkap token dari Parameter URL atau Body Request)
-          orig_request = requests.Session.request
-          def patched_request(self, method, url, *args, **kwargs):
-              try:
-                  parsed = urlparse.urlparse(url)
-                  params = urlparse.parse_qs(parsed.query)
-                  access_token = params.get('access_token', [None])[0]
-                  shop_id = params.get('shop_id', [None])[0]
-                  
-                  if access_token and shop_id:
-                      save_token(shop_id, access_token)
-                      
-                  if 'json' in kwargs and isinstance(kwargs['json'], dict):
-                      scan_and_extract(kwargs['json'])
-              except: pass
-              return orig_request(self, method, url, *args, **kwargs)
-          
-          requests.Session.request = patched_request
-
-          # LAYER 2: Sadap Inbound Response (Menangkap data terbungkus hasil refresh token Shopee)
-          orig_json = requests.Response.json
-          def patched_json(self, *args, **kwargs):
-              val = orig_json(self, *args, **kwargs)
-              try:
-                  if isinstance(val, dict):
-                      scan_and_extract(val)
-              except: pass
-              return val
-          
-          requests.Response.json = patched_json
-          EOF
-          
-          # Injeksi kode ke file pembantu utama sebelum runtime eksekusi skrip naikkan produk
-          if [ -f "scripts/zeodda_helpers.py" ]; then
-            cat interceptor.py "scripts/zeodda_helpers.py" > temp.py && mv temp.py "scripts/zeodda_helpers.py"
-            echo "✅ Live Interceptor Deep-Scan Aktif."
-          else
-            mkdir -p scripts && cp interceptor.py scripts/zeodda_helpers.py
-            echo "⚠️ zeodda_helpers.py diinisialisasi baru."
-          fi
-
       - name: Run Boost
         run: python scripts/Naikkan_Produk.py
-
-      # STEP SINKRONISASI: Mengirim data hasil Deep-Scan langsung ke Cloudflare KV
-      - name: Push token ke Cloudflare KV
-        if: always()
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_KV_NAMESPACE: ${{ secrets.CF_KV_NAMESPACE }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-        run: |
-          python -c "
-          import os, requests, json, sys
-
-          cf_id = os.getenv('CF_ACCOUNT_ID')
-          cf_ns = os.getenv('CF_KV_NAMESPACE')
-          cf_token = os.getenv('CF_API_TOKEN')
-
-          if not all([cf_id, cf_ns, cf_token]):
-              print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum lengkap!')
-              sys.exit(1)
-
-          cache_file = 'cf_tokens_cache.json'
-          if not os.path.exists(cache_file):
-              print('❌ Gagal: Token gagal disadap. Pastikan script utama berjalan melakukan hit API Shopee.')
-              sys.exit(1)
-
-          with open(cache_file, 'r') as f:
-              tokens = json.load(f)
-
-          print(f'=== SINKRONISASI {len(tokens)} TOKO KE CLOUDFLARE KV ===')
-          for shop_id, token in tokens.items():
-              url = f'https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}'
-              headers = {'Authorization': f'Bearer {cf_token}', 'Content-Type': 'text/plain'}
-              res = requests.put(url, headers=headers, data=str(token))
-              if res.status_code == 200:
-                  print(f'✅ Toko {shop_id}: Berhasil sinkronisasi token aktif ke Cloudflare.')
-              else:
-                  print(f'❌ Toko {shop_id}: Gagal kirim ke KV ({res.status_code}) -> {res.text}')
-          print('=== SINKRONISASI SELESAI ===')
-          "
 
       - name: Notify success
         if: success()
