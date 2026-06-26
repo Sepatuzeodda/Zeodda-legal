@@ -1,7 +1,7 @@
 """
 scripts/zeodda_helpers.py
 Shared utilities untuk semua Zeodda automation scripts.
-Revisi: Menambahkan mekanisme auto-refresh SHOPEE_ACCESS_TOKEN menggunakan SHOPEE_REFRESH_TOKEN.
+Revisi: multi-shop refresh + Cloudflare KV push.
 """
 
 import hmac
@@ -11,15 +11,30 @@ import requests
 import os
 from datetime import datetime, timedelta
 
-SHOPEE_PARTNER_ID    = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
-SHOPEE_PARTNER_KEY   = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
-SHOPEE_SHOP_ID       = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
-SHOPEE_REFRESH_TOKEN = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip() # Wajib ditambahkan di GitHub Secrets
-SHOPEE_BASE_URL      = "https://partner.shopeemobile.com"
+# ─── Shopee credentials ───────────────────────────────────────────────────────
+SHOPEE_PARTNER_ID  = int(os.environ.get("SHOPEE_PARTNER_ID", "2035358"))
+SHOPEE_PARTNER_KEY = os.environ.get("SHOPEE_PARTNER_KEY", "").strip()
+SHOPEE_BASE_URL    = "https://partner.shopeemobile.com"
 
-# Global variable untuk menampung token aktif hasil refresh otomatis
+# Default shop (untuk backward compat kode lama yg pakai shopee_get tanpa shop_id)
+SHOPEE_SHOP_ID = int(os.environ.get("SHOPEE_SHOP_ID", "963980234"))
+
+# ─── Multi-shop: active tokens per shop_id ────────────────────────────────────
+# Key: int(shop_id), Value: access_token string
+# Diisi oleh refresh_and_push_all_shops() di awal workflow
+_active_tokens = {}
+
+# Backward compat: token tunggal (dipakai shopee_get lama)
 _SHOPEE_ACTIVE_TOKEN = os.environ.get("SHOPEE_ACCESS_TOKEN", "").strip()
+if _SHOPEE_ACTIVE_TOKEN:
+    _active_tokens[SHOPEE_SHOP_ID] = _SHOPEE_ACTIVE_TOKEN
 
+# ─── Cloudflare KV credentials ────────────────────────────────────────────────
+CF_ACCOUNT_ID   = os.environ.get("CF_ACCOUNT_ID", "").strip()
+CF_KV_NAMESPACE = os.environ.get("CF_KV_NAMESPACE", "").strip()
+CF_API_TOKEN    = os.environ.get("CF_API_TOKEN", "").strip()
+
+# ─── Lark credentials ─────────────────────────────────────────────────────────
 LARK_APP_ID     = os.environ.get("LARK_APP_ID", "")
 LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "")
 LARK_APP_TOKEN  = "ItPfb0MPNaD6KhsVc65lT6p1gTh"
@@ -33,6 +48,7 @@ TABLE_KOMPARASI      = "tblZoIIwUj0RN93p"
 TABLE_FINANCIAL      = "tblLh7liZZxPzEpl"
 TABLE_ALERT_LOG      = "tblobivbXf5KBsUK"
 
+# ─── Safe type helpers ────────────────────────────────────────────────────────
 def safe_int(val):
     if val is None: return 0
     if isinstance(val, (dict, list)): return 0
@@ -53,6 +69,7 @@ def safe_list(d, key):
     v = d.get(key, [])
     return v if isinstance(v, list) else []
 
+# ─── Date helpers ─────────────────────────────────────────────────────────────
 def get_yesterday_range():
     now_wib       = datetime.utcnow() + timedelta(hours=7)
     yesterday_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
@@ -65,96 +82,214 @@ def get_yesterday_range():
         "label":        yesterday_wib.strftime("%Y-%m-%d"),
     }
 
-def shopee_sign(path, timestamp, access_token=None):
-    # Menggunakan token aktif baru jika ada
-    tok = access_token if access_token is not None else _SHOPEE_ACTIVE_TOKEN
-    base = f"{SHOPEE_PARTNER_ID}{path}{timestamp}{tok}{SHOPEE_SHOP_ID}"
+# ─── Shopee: HMAC-SHA256 signature ───────────────────────────────────────────
+def shopee_sign(path, timestamp, access_token=None, shop_id=None):
+    """
+    Dengan access_token + shop_id → signature untuk API biasa.
+    Tanpa keduanya           → signature untuk refresh_token (tidak butuh auth).
+    """
+    if access_token and shop_id:
+        base = f"{SHOPEE_PARTNER_ID}{path}{timestamp}{access_token}{shop_id}"
+    else:
+        base = f"{SHOPEE_PARTNER_ID}{path}{timestamp}"
     return hmac.new(SHOPEE_PARTNER_KEY.encode(), base.encode(), hashlib.sha256).hexdigest()
 
-def refresh_shopee_token():
-    """Fungsi otomatis untuk memperbarui access_token memakai refresh_token."""
-    global _SHOPEE_ACTIVE_TOKEN
-    if not SHOPEE_REFRESH_TOKEN:
-        print("⚠️ [REFRESH] SHOPEE_REFRESH_TOKEN tidak ditemukan di Environment Variables!")
-        return
-        
-    path = "/api/v2/auth/access_token/get"
-    ts = int(time.time())
-    
-    # Signature untuk refresh token tidak menggunakan access_token & shop_id
-    base_sign = f"{SHOPEE_PARTNER_ID}{path}{ts}"
-    sign = hmac.new(SHOPEE_PARTNER_KEY.encode(), base_sign.encode(), hashlib.sha256).hexdigest()
-    
-    url = f"{SHOPEE_BASE_URL}{path}"
-    params = {
-        "partner_id": SHOPEE_PARTNER_ID,
-        "timestamp": ts,
-        "sign": sign
-    }
-    payload = {
-        "refresh_token": SHOPEE_REFRESH_TOKEN,
-        "partner_id": SHOPEE_PARTNER_ID,
-        "shop_id": SHOPEE_SHOP_ID
-    }
-    
-    try:
-        r = requests.post(url, params=params, json=payload, timeout=30)
-        res_data = r.json()
-        if "access_token" in res_data:
-            _SHOPEE_ACTIVE_TOKEN = res_data["access_token"]
-            print(f"🔄 [REFRESH] Sukses memperbarui Access Token Shopee untuk sesi ini.")
-            # Note: Idealnya refresh_token baru yang ada di res_data["refresh_token"] disimpan kembali,
-            # namun untuk GitHub Actions runner lama, refresh_token ini tetap valid digunakan selama 30 hari.
-        else:
-            print(f"❌ [REFRESH] Gagal refresh token: {res_data.get('error')} - {res_data.get('message')}")
-    except Exception as e:
-        print(f"❌ [REFRESH] Request error saat refresh token: {e}")
+# ─── Cloudflare KV: push satu token ──────────────────────────────────────────
+def push_token_to_kv(shop_id, access_token):
+    """
+    Push access_token ke Cloudflare KV dengan key 'token:{shop_id}'.
+    Return True jika berhasil.
+    """
+    if not all([CF_ACCOUNT_ID, CF_KV_NAMESPACE, CF_API_TOKEN]):
+        print(f"  ⚠️ [KV] Kredensial CF belum lengkap — skip push shop {shop_id}")
+        return False
 
+    # Key pakai format token:{shop_id} — URL-encode ':' jadi %3A
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
+        f"/storage/kv/namespaces/{CF_KV_NAMESPACE}/values/token%3A{shop_id}"
+    )
+    try:
+        r      = requests.put(
+            url,
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}"},
+            data=str(access_token),
+            timeout=30
+        )
+        result = r.json()
+        if result.get("success"):
+            print(f"  ✅ [KV] shop {shop_id}: token berhasil di-push ke KV")
+            return True
+        errors = result.get("errors", [])
+        print(f"  ❌ [KV] shop {shop_id}: gagal push — {errors}")
+        return False
+    except Exception as e:
+        print(f"  ❌ [KV] shop {shop_id}: request error — {e}")
+        return False
+
+# ─── Shopee: refresh token satu toko ─────────────────────────────────────────
+def refresh_shop_token(shop_id, refresh_token):
+    """
+    Refresh access_token untuk satu shop_id menggunakan refresh_token-nya.
+    Return access_token baru (str) atau None jika gagal.
+    """
+    if not refresh_token:
+        print(f"  ⚠️ [REFRESH] shop {shop_id}: refresh_token kosong, skip")
+        return None
+
+    path = "/api/v2/auth/access_token/get"
+    ts   = int(time.time())
+    # Signature refresh: TANPA access_token & shop_id
+    sign = shopee_sign(path, ts)
+
+    try:
+        r = requests.post(
+            f"{SHOPEE_BASE_URL}{path}",
+            params={"partner_id": SHOPEE_PARTNER_ID, "timestamp": ts, "sign": sign},
+            json={"refresh_token": refresh_token, "partner_id": SHOPEE_PARTNER_ID, "shop_id": shop_id},
+            timeout=30
+        )
+        data = r.json()
+        tok  = data.get("access_token")
+        if tok:
+            _active_tokens[int(shop_id)] = tok
+            print(f"  ✅ [REFRESH] shop {shop_id}: token baru didapat")
+            return tok
+        print(f"  ❌ [REFRESH] shop {shop_id}: {data.get('error')} — {data.get('message', '')}")
+        return None
+    except Exception as e:
+        print(f"  ❌ [REFRESH] shop {shop_id}: request error — {e}")
+        return None
+
+# ─── Refresh + push SEMUA toko ke KV ─────────────────────────────────────────
+def refresh_and_push_all_shops():
+    """
+    Loop semua shop ID dari SHOPEE_SHOP_IDS, refresh token tiap toko
+    (dari SHOPEE_REFRESH_TOKEN_{shop_id}), lalu push ke Cloudflare KV.
+    Dipanggil SATU KALI di awal setiap workflow run.
+    """
+    raw = os.environ.get("SHOPEE_SHOP_IDS", "").strip()
+    if not raw:
+        print("⚠️ [REFRESH_ALL] SHOPEE_SHOP_IDS kosong — tidak ada toko yang di-refresh")
+        return
+
+    shop_ids = []
+    for s in raw.replace(" ", "").split(","):
+        s = s.strip()
+        if s:
+            try: shop_ids.append(int(s))
+            except ValueError: pass
+
+    print(f"\n{'='*55}")
+    print(f"🔄 Refresh & push token untuk {len(shop_ids)} toko ke Cloudflare KV")
+    print(f"{'='*55}")
+
+    ok_count = 0
+    for sid in shop_ids:
+        rt  = os.environ.get(f"SHOPEE_REFRESH_TOKEN_{sid}", "").strip()
+        tok = refresh_shop_token(sid, rt)
+        if tok:
+            success = push_token_to_kv(sid, tok)
+            if success:
+                ok_count += 1
+        time.sleep(0.5)  # hindari rate limit Shopee & Cloudflare
+
+    print(f"{'='*55}")
+    print(f"✅ Selesai: {ok_count}/{len(shop_ids)} toko berhasil refresh + push ke KV")
+    print(f"{'='*55}\n")
+
+# ─── Shopee: refresh token (backward compat, satu toko) ──────────────────────
+def refresh_shopee_token():
+    """
+    Backward compat: refresh token untuk SHOPEE_SHOP_ID default.
+    Sekarang juga push ke KV otomatis.
+    """
+    global _SHOPEE_ACTIVE_TOKEN
+    rt = os.environ.get("SHOPEE_REFRESH_TOKEN", "").strip()
+    tok = refresh_shop_token(SHOPEE_SHOP_ID, rt)
+    if tok:
+        _SHOPEE_ACTIVE_TOKEN = tok
+        push_token_to_kv(SHOPEE_SHOP_ID, tok)
+
+# ─── Shopee GET (single shop, backward compat) ───────────────────────────────
 def shopee_get(path, extra={}):
     global _SHOPEE_ACTIVE_TOKEN
-    ts = int(time.time())
-    
-    # Cek & lakukan refresh token sebelum melakukan pemanggilan API biasa
-    if extra.get("_is_retry") is not True and ("invalid_acceess_token" in str(extra) or _SHOPEE_ACTIVE_TOKEN == ""):
-        refresh_shopee_token()
+    tok = _active_tokens.get(SHOPEE_SHOP_ID, _SHOPEE_ACTIVE_TOKEN)
+    ts  = int(time.time())
 
     params = {
         "partner_id":   SHOPEE_PARTNER_ID,
         "timestamp":    ts,
-        "access_token": _SHOPEE_ACTIVE_TOKEN,
+        "access_token": tok,
         "shop_id":      SHOPEE_SHOP_ID,
-        "sign":         shopee_sign(path, ts, _SHOPEE_ACTIVE_TOKEN),
+        "sign":         shopee_sign(path, ts, tok, SHOPEE_SHOP_ID),
     }
-    
-    # Hapus internal tracker flag jika ada sebelum dilempar ke query params Shopee
     clean_extra = {k: v for k, v in extra.items() if k != "_is_retry"}
     params.update(clean_extra)
-    
+
     try:
         r    = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
         data = r.json()
-        
-        # Jika token expired di tengah jalan, lakukan refresh otomatis satu kali
-        if data.get("error") == "invalid_acceess_token" and extra.get("_is_retry") != True:
-            print("🔄 [API] Token kedaluwarsa terdeteksi. Mencoba auto-refresh token...")
+
+        if data.get("error") == "invalid_acceess_token" and extra.get("_is_retry") is not True:
+            print("🔄 [API] Token kedaluwarsa, mencoba refresh...")
             refresh_shopee_token()
             extra["_is_retry"] = True
             return shopee_get(path, extra)
-            
+
         if data.get("error") and data.get("error") != "":
-            print(f"  ⚠️ [{path}]: {data.get('error')} - {data.get('message','')[:80]}")
-        resp = data.get("response")
-        return resp if isinstance(resp, dict) else {}
+            print(f"  ⚠️ [{path}]: {data.get('error')} — {data.get('message','')[:80]}")
+        return data.get("response") or {}
     except Exception as e:
         print(f"  ❌ Request error {path}: {e}")
         return {}
 
+# ─── Shopee GET multi-shop ────────────────────────────────────────────────────
+def shopee_get_shop(path, shop_id, extra={}):
+    """Panggil Shopee GET API untuk shop_id tertentu (multi-shop)."""
+    tok = _active_tokens.get(int(shop_id), "")
+    if not tok:
+        print(f"  ⚠️ [API] Token shop {shop_id} tidak ada di _active_tokens")
+        return {}
+
+    ts = int(time.time())
+    params = {
+        "partner_id":   SHOPEE_PARTNER_ID,
+        "timestamp":    ts,
+        "access_token": tok,
+        "shop_id":      shop_id,
+        "sign":         shopee_sign(path, ts, tok, shop_id),
+    }
+    clean_extra = {k: v for k, v in extra.items() if k != "_is_retry"}
+    params.update(clean_extra)
+
+    try:
+        r    = requests.get(f"{SHOPEE_BASE_URL}{path}", params=params, timeout=30)
+        data = r.json()
+
+        if data.get("error") == "invalid_acceess_token" and extra.get("_is_retry") is not True:
+            print(f"🔄 [API] Token shop {shop_id} kedaluwarsa, refresh...")
+            rt  = os.environ.get(f"SHOPEE_REFRESH_TOKEN_{shop_id}", "").strip()
+            new = refresh_shop_token(shop_id, rt)
+            if new:
+                push_token_to_kv(shop_id, new)
+            extra["_is_retry"] = True
+            return shopee_get_shop(path, shop_id, extra)
+
+        if data.get("error") and data.get("error") != "":
+            print(f"  ⚠️ [{path}] shop {shop_id}: {data.get('error')} — {data.get('message','')[:80]}")
+        return data.get("response") or {}
+    except Exception as e:
+        print(f"  ❌ Request error {path} shop {shop_id}: {e}")
+        return {}
+
+# ─── Lark helpers ─────────────────────────────────────────────────────────────
 _lark_tenant_token = None
 
 def get_lark_tenant_token():
     global _lark_tenant_token
     if _lark_tenant_token: return _lark_tenant_token
-    url = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
+    url  = f"{LARK_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
     r    = requests.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
     data = r.json()
     if data.get("code") != 0:
@@ -168,7 +303,7 @@ def get_lark_headers():
 def lark_add(table_id, fields):
     url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records"
     try:
-        r = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
+        r      = requests.post(url, headers=get_lark_headers(), json={"fields": fields}, timeout=30)
         result = r.json()
         if result.get("code") != 0:
             print(f"  ❌ Lark error {result.get('code')}: {result.get('msg')}")
@@ -181,8 +316,8 @@ def lark_add_batch(table_id, records_list):
     if not records_list: return {"code": 0}
     url = f"{LARK_BASE_URL}/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{table_id}/records/batch_create"
     try:
-        r = requests.post(url, headers=get_lark_headers(),
-              json={"records": [{"fields": f} for f in records_list]}, timeout=30)
+        r      = requests.post(url, headers=get_lark_headers(),
+                     json={"records": [{"fields": f} for f in records_list]}, timeout=30)
         result = r.json()
         if result.get("code") != 0:
             print(f"  ❌ Lark batch error {result.get('code')}: {result.get('msg')}")
