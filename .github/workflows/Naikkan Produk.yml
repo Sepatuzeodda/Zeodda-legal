@@ -53,16 +53,18 @@ jobs:
           orig_json = requests.Response.json
           def patched_json(self, *args, **kwargs):
               val = orig_json(self, *args, **kwargs)
-              # Jika isi payload response dari Shopee mengandung access_token, tangkap!
               if isinstance(val, dict) and 'access_token' in val:
-                  sid = val.get('shop_id')
                   tok = val.get('access_token')
+                  sid = val.get('shop_id')
+                  # Shopee refresh balikinnya shop_id_list (array), bukan shop_id tunggal
+                  if not sid:
+                      lst = val.get('shop_id_list') or val.get('shop_ids') or []
+                      if lst: sid = lst[0]
                   if sid and tok:
                       try:
                           with open('cf_tokens_cache.json', 'r') as f: data = json.load(f)
                       except: data = {}
                       data[str(sid)] = str(tok)
-                      # Simpan token secara fisik ke dalam file json penampung
                       with open('cf_tokens_cache.json', 'w') as f: json.dump(data, f)
               return val
           requests.Response.json = patched_json
