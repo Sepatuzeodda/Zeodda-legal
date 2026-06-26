@@ -41,50 +41,76 @@ jobs:
       - name: Install dependencies
         run: pip install requests PyNaCl
 
-      # STEP BARU: Menyadap library requests untuk merekam token secara live dari RAM ke file fisik
+      # STEP UTAMA: Menyadap request dan response untuk mendapatkan token aktif atau token refresh
       - name: Inject Token Interceptor
         run: |
           cat << 'EOF' > interceptor.py
           import requests
           import json
           import os
+          import urllib.parse as urlparse
 
-          # Membajak fungsi bawaan response.json() milik library requests
+          # Definisikan file penampung data token fisik di disk
+          cache_file = 'cf_tokens_cache.json'
+
+          def save_token(shop_id, token):
+              if not shop_id or not token: return
+              try:
+                  with open(cache_file, 'r') as f: data = json.load(f)
+              except: data = {}
+              data[str(shop_id)] = str(token)
+              with open(cache_file, 'w') as f: json.dump(data, f)
+
+          # LAYER 1: Sadap Outbound Request (Menangkap token aktif saat skrip mengeksekusi operasi transaksi/boost)
+          orig_request = requests.Session.request
+          def patched_request(self, method, url, *args, **kwargs):
+              try:
+                  parsed = urlparse.urlparse(url)
+                  params = urlparse.parse_qs(parsed.query)
+                  
+                  # Ambil access_token dan shop_id dari query string parameter URL Shopee API
+                  access_token = params.get('access_token', [None])[0]
+                  shop_id = params.get('shop_id', [None])[0]
+                  
+                  # Fallback jika shop_id dilempar melalui payload json atau parameter tambahan
+                  if not shop_id and 'json' in kwargs and isinstance(kwargs['json'], dict):
+                      shop_id = kwargs['json'].get('shop_id')
+                  if not shop_id and 'params' in kwargs and isinstance(kwargs['params'], dict):
+                      shop_id = kwargs['params'].get('shop_id')
+                      
+                  if access_token and shop_id:
+                      save_token(shop_id, access_token)
+              except: pass
+              return orig_request(self, method, url, *args, **kwargs)
+          
+          requests.Session.request = patched_request
+
+          # LAYER 2: Sadap Response JSON (Menangkap token baru jika script melakukan refresh token di tengah jalan)
           orig_json = requests.Response.json
           def patched_json(self, *args, **kwargs):
               val = orig_json(self, *args, **kwargs)
               if isinstance(val, dict) and 'access_token' in val:
-                  tok = val.get('access_token')
-                  sid = val.get('shop_id')
-                  # Shopee refresh balikinnya shop_id_list (array), bukan shop_id tunggal
-                  if not sid:
-                      lst = val.get('shop_id_list') or val.get('shop_ids') or []
-                      if lst: sid = lst[0]
-                  if sid and tok:
-                      try:
-                          with open('cf_tokens_cache.json', 'r') as f: data = json.load(f)
-                      except: data = {}
-                      data[str(sid)] = str(tok)
-                      with open('cf_tokens_cache.json', 'w') as f: json.dump(data, f)
+                  save_token(val.get('shop_id'), val.get('access_token'))
               return val
+          
           requests.Response.json = patched_json
           EOF
           
-          # Menyisipkan interceptor ke baris paling atas zeodda_helpers.py agar dieksekusi otomatis
+          # Menyisipkan interceptor dual-layer ke baris teratas file helper sebelum eksekusi script utama
           if [ -f "scripts/zeodda_helpers.py" ]; then
             cat interceptor.py "scripts/zeodda_helpers.py" > temp.py && mv temp.py "scripts/zeodda_helpers.py"
-            echo "✅ Interceptor berhasil aktif di zeodda_helpers.py"
+            echo "✅ Live Interceptor Dual-Layer Berhasil Diaktifkan."
           else
             mkdir -p scripts && cp interceptor.py scripts/zeodda_helpers.py
-            echo "⚠️ zeodda_helpers.py dibuat baru sebagai standalone tracker"
+            echo "⚠️ zeodda_helpers.py diinisialisasi baru."
           fi
 
       - name: Run Boost
         run: python scripts/Naikkan_Produk.py
 
-      # STEP ADJUSTMENT: Membaca file hasil sadapan interceptor dan push langsung ke Cloudflare KV
+      # STEP PUSH TOKV: Mengirimkan hasil sadapan (token lama yang aktif maupun token baru) ke Cloudflare KV
       - name: Push token ke Cloudflare KV
-        if: always() # Tetap berjalan untuk mengamankan toko yang sudah sukses meskipun ada sebagian toko yang error
+        if: always() # Dipastikan tetap berjalan untuk mengamankan data toko yang sukses terproses
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_NAMESPACE: ${{ secrets.CF_KV_NAMESPACE }}
@@ -98,27 +124,27 @@ jobs:
           cf_token = os.getenv('CF_API_TOKEN')
 
           if not all([cf_id, cf_ns, cf_token]):
-              print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum diisi!')
+              print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum lengkap!')
               sys.exit(1)
 
           cache_file = 'cf_tokens_cache.json'
           if not os.path.exists(cache_file):
-              print('⚠️ Warning: Tidak ada token baru yang perlu di-push ke Cloudflare pada sesi ini.')
-              sys.exit(0)
+              print('❌ Gagal: Token gagal disadap. Pastikan script utama melakukan hit API ke Shopee.')
+              sys.exit(1)
 
           with open(cache_file, 'r') as f:
               tokens = json.load(f)
 
-          print(f'=== MEMULAI SINKRONISASI {len(tokens)} TOKEN KE CLOUDFLARE KV ===')
+          print(f'=== MEMULAI SINKRONISASI {len(tokens)} TOKO KE CLOUDFLARE KV ===')
           for shop_id, token in tokens.items():
               url = f'https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}'
               headers = {'Authorization': f'Bearer {cf_token}', 'Content-Type': 'text/plain'}
               res = requests.put(url, headers=headers, data=str(token))
               if res.status_code == 200:
-                  print(f'✅ Toko {shop_id}: Berhasil push token terbaru ke KV.')
+                  print(f'✅ Toko {shop_id}: Berhasil amankan token aktif ke KV Cloudflare.')
               else:
-                  print(f'❌ Toko {shop_id}: Gagal push ke KV ({res.status_code}) -> {res.text}')
-          print('=== SINKRONISASI CLOUDFLARE KV SELESAI ===')
+                  print(f'❌ Toko {shop_id}: Gagal kirim ke KV ({res.status_code}) -> {res.text}')
+          print('=== SINKRONISASI SELESAI ===')
           "
 
       - name: Notify success
