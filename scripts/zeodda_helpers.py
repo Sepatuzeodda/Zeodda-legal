@@ -1,61 +1,38 @@
 # =========================================================================
-# SYSTEM CLOUDFLARE KV: SINKRONISASI TOKEN (NON-BLOCKING / SHADOW)
+# SYSTEM CLOUDFLARE KV: DIRECT INJECTION (MODAL INJECT)
 # =========================================================================
-import threading
-
-def _async_sync(shop_id, token):
-    """Menjalankan sinkronisasi di background agar tidak mengganggu script utama"""
-    def task():
+def sync_to_cf(shop_id, token):
+    """Fungsi sinkronisasi langsung dipanggil saat token didapat."""
+    shop_id = str(shop_id).strip()
+    token = str(token).strip()
+    if not shop_id or not token or len(shop_id) < 5: return
+    
+    cf_id = os.environ.get("CF_ACCOUNT_ID")
+    cf_ns = os.environ.get("CF_KV_NAMESPACE")
+    cf_token = os.environ.get("CF_API_TOKEN")
+    
+    if cf_id and cf_ns and cf_token:
         try:
-            cf_id = os.environ.get("CF_ACCOUNT_ID")
-            cf_ns = os.environ.get("CF_KV_NAMESPACE")
-            cf_token = os.environ.get("CF_API_TOKEN")
-            if not (cf_id and cf_ns and cf_token): return
-            
             url = f"https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}"
             headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "text/plain"}
-            requests.put(url, headers=headers, data=str(token).strip(), timeout=10)
-        except: pass
-    
-    threading.Thread(target=task, daemon=True).start()
+            requests.put(url, headers=headers, data=token, timeout=10)
+            print(f"✅ [CLOUDFLARE] Token toko {shop_id} diamankan ke KV!")
+        except Exception as e:
+            print(f"❌ [CLOUDFLARE] Gagal sync toko {shop_id}: {e}")
 
-# Kita simpan referensi asli agar tetap bisa dipakai Lark/Shopee
-_orig_post = requests.post
-_orig_get = requests.get
-
-def _monitor_and_sync(res, **kwargs):
-    """Fungsi pengintai untuk mengambil token dari respons"""
+# --- UPDATE FUNGSI REFRESH (TAMBAHKAN sync_to_cf DI SINI) ---
+# Update bagian akhir fungsi refresh_shopee_token Anda menjadi seperti ini:
+def refresh_shopee_token():
+    # ... (kode lama anda) ...
     try:
-        data = res.json()
-        
-        # 1. Deteksi jika ini adalah respons dari /access_token/get
-        if isinstance(data, dict):
-            token = data.get("access_token")
-            # Cek shop_id dari payload request jika ada
-            payload = kwargs.get("json", {})
-            shop_id = payload.get("shop_id") if isinstance(payload, dict) else None
-            
-            if token and shop_id:
-                _async_sync(shop_id, token)
-                
-            # Jika respons mengandung list atau nested object
-            if not shop_id and "response" in data and isinstance(data["response"], dict):
-                token = data["response"].get("access_token")
-                shop_id = data["response"].get("shop_id")
-                if token and shop_id:
-                    _async_sync(shop_id, token)
-    except: pass
-    return res
-
-def patched_post(*args, **kwargs):
-    res = _orig_post(*args, **kwargs)
-    return _monitor_and_sync(res, **kwargs)
-
-def patched_get(*args, **kwargs):
-    res = _orig_get(*args, **kwargs)
-    return _monitor_and_sync(res, **kwargs)
-
-# Pasang pengintai tanpa merusak fungsi asli
-requests.post = patched_post
-requests.get = patched_get
-# =========================================================================
+        r = requests.post(url, params=params, json=payload, timeout=30)
+        res_data = r.json()
+        if "access_token" in res_data:
+            _SHOPEE_ACTIVE_TOKEN = res_data["access_token"]
+            print(f"🔄 [REFRESH] Sukses memperbarui Access Token Shopee.")
+            # --- TAMBAHKAN BARIS INI ---
+            sync_to_cf(SHOPEE_SHOP_ID, _SHOPEE_ACTIVE_TOKEN)
+        else:
+            print(f"❌ [REFRESH] Gagal refresh: {res_data.get('error')}")
+    except Exception as e:
+        print(f"❌ [REFRESH] Request error: {e}")
