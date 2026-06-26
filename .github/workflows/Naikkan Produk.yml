@@ -41,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests PyNaCl
 
-      # STEP UTAMA: Menyadap request/response secara mendalam menggunakan Deep Recursive Scan
+      # STEP UTAMA: Injeksi Stateful Interceptor Berjalur Absolut
       - name: Inject Token Interceptor
         run: |
           cat << 'EOF' > interceptor.py
@@ -50,71 +50,76 @@ jobs:
           import os
           import urllib.parse as urlparse
 
-          cache_file = 'cf_tokens_cache.json'
+          # Menggunakan jalur absolut /tmp/ agar aman dari os.chdir() script utama
+          cache_file = '/tmp/cf_tokens_cache.json'
+          CURRENT_SHOP_ID = None
 
           def save_token(shop_id, token):
               if not shop_id or not token: return
+              shop_id = str(shop_id).strip()
+              token = str(token).strip()
               try:
                   with open(cache_file, 'r') as f: data = json.load(f)
               except: data = {}
-              data[str(shop_id)] = str(token)
+              data[shop_id] = token
               with open(cache_file, 'w') as f: json.dump(data, f)
 
-          # Fungsi pemindai rekursif untuk membongkar objek JSON Shopee v2 secara total
-          def scan_and_extract(payload):
-              if not isinstance(payload, dict): return
-              
-              # Pola 1: Jika access_token dan shop_id berada di level yang sama (misal di dalam objek 'response')
-              if 'access_token' in payload and 'shop_id' in payload:
-                  save_token(payload.get('shop_id'), payload.get('access_token'))
-                  
-              # Pola 2: Standard Shopee API v2 wrapper check
-              if 'response' in payload and isinstance(payload['response'], dict):
-                  resp = payload['response']
-                  if 'access_token' in resp:
-                      save_token(resp.get('shop_id') or resp.get('partner_id'), resp.get('access_token'))
-                      
-              # Telusuri seluruh cabang dictionary secara rekursif jika ada payload bercabang lain
-              for k, v in payload.items():
-                  if isinstance(v, dict):
-                      scan_and_extract(v)
-
-          # LAYER 1: Sadap Outbound Request (Menangkap token dari Parameter URL atau Body Request)
+          # Pembajakan inti lalu lintas keluar-masuk library requests
           orig_request = requests.Session.request
           def patched_request(self, method, url, *args, **kwargs):
+              global CURRENT_SHOP_ID
               try:
+                  req_shop_id = None
+                  req_access_token = None
+
+                  # 1. Ambil data jika dilempar lewat URL Query String
                   parsed = urlparse.urlparse(url)
                   params = urlparse.parse_qs(parsed.query)
-                  access_token = params.get('access_token', [None])[0]
-                  shop_id = params.get('shop_id', [None])[0]
-                  
-                  if access_token and shop_id:
-                      save_token(shop_id, access_token)
-                      
-                  if 'json' in kwargs and isinstance(kwargs['json'], dict):
-                      scan_and_extract(kwargs['json'])
-              except: pass
-              return orig_request(self, method, url, *args, **kwargs)
-          
-          requests.Session.request = patched_request
+                  if params.get('shop_id'): req_shop_id = params.get('shop_id')[0]
+                  if params.get('access_token'): req_access_token = params.get('access_token')[0]
 
-          # LAYER 2: Sadap Inbound Response (Menangkap data terbungkus hasil refresh token Shopee)
-          orig_json = requests.Response.json
-          def patched_json(self, *args, **kwargs):
-              val = orig_json(self, *args, **kwargs)
-              try:
-                  if isinstance(val, dict):
-                      scan_and_extract(val)
+                  # 2. Ambil data jika dilempar lewat keyword arguments params (requests.post(url, params=...))
+                  if 'params' in kwargs and isinstance(kwargs['params'], dict):
+                      if kwargs['params'].get('shop_id'): req_shop_id = kwargs['params'].get('shop_id')
+                      if kwargs['params'].get('access_token'): req_access_token = kwargs['params'].get('access_token')
+
+                  # 3. Ambil data jika dilempar lewat JSON Body payload
+                  if 'json' in kwargs and isinstance(kwargs['json'], dict):
+                      if kwargs['json'].get('shop_id'): req_shop_id = kwargs['json'].get('shop_id')
+                      if kwargs['json'].get('access_token'): req_access_token = kwargs['json'].get('access_token')
+
+                  # Ikat shop_id ke memori status global jika terdeteksi di request
+                  if req_shop_id:
+                      CURRENT_SHOP_ID = req_shop_id
+
+                  # Jika request adalah transaksi normal (akses token & shop id lengkap), langsung amankan
+                  if req_shop_id and req_access_token:
+                      save_token(req_shop_id, req_access_token)
               except: pass
-              return val
-          
-          requests.Response.json = patched_json
+
+              # Eksekusi request asli ke server Shopee
+              res = orig_request(self, method, url, *args, **kwargs)
+
+              # 4. Amankan token baru dari response body hasil refresh token secara stateful
+              try:
+                  val = res.json()
+                  if isinstance(val, dict):
+                      target = val.get('response') if isinstance(val.get('response'), dict) else val
+                      if 'access_token' in target:
+                          sid = target.get('shop_id') or CURRENT_SHOP_ID
+                          tok = target.get('access_token')
+                          if sid and tok:
+                              save_token(sid, tok)
+              except: pass
+
+              return res
+
+          requests.Session.request = patched_request
           EOF
           
-          # Injeksi kode ke file pembantu utama sebelum runtime eksekusi skrip naikkan produk
           if [ -f "scripts/zeodda_helpers.py" ]; then
             cat interceptor.py "scripts/zeodda_helpers.py" > temp.py && mv temp.py "scripts/zeodda_helpers.py"
-            echo "✅ Live Interceptor Deep-Scan Aktif."
+            echo "✅ Live Interceptor Stateful Deep-Scan Aktif."
           else
             mkdir -p scripts && cp interceptor.py scripts/zeodda_helpers.py
             echo "⚠️ zeodda_helpers.py diinisialisasi baru."
@@ -123,7 +128,7 @@ jobs:
       - name: Run Boost
         run: python scripts/Naikkan_Produk.py
 
-      # STEP SINKRONISASI: Mengirim data hasil Deep-Scan langsung ke Cloudflare KV
+      # STEP SINKRONISASI: Membaca berkas absolut dari /tmp/ lalu push data ke Cloudflare KV
       - name: Push token ke Cloudflare KV
         if: always()
         env:
@@ -142,9 +147,9 @@ jobs:
               print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum lengkap!')
               sys.exit(1)
 
-          cache_file = 'cf_tokens_cache.json'
+          cache_file = '/tmp/cf_tokens_cache.json'
           if not os.path.exists(cache_file):
-              print('❌ Gagal: Token gagal disadap. Pastikan script utama berjalan melakukan hit API Shopee.')
+              print('❌ Gagal: Token gagal disadap. Hubungi pengembang untuk pengecekan library requests.')
               sys.exit(1)
 
           with open(cache_file, 'r') as f:
@@ -156,7 +161,7 @@ jobs:
               headers = {'Authorization': f'Bearer {cf_token}', 'Content-Type': 'text/plain'}
               res = requests.put(url, headers=headers, data=str(token))
               if res.status_code == 200:
-                  print(f'✅ Toko {shop_id}: Berhasil sinkronisasi token aktif ke Cloudflare.')
+                  print(f'✅ Toko {shop_id}: Berhasil amankan token aktif ke Cloudflare KV.')
               else:
                   print(f'❌ Toko {shop_id}: Gagal kirim ke KV ({res.status_code}) -> {res.text}')
           print('=== SINKRONISASI SELESAI ===')
