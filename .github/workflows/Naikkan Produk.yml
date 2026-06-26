@@ -41,72 +41,81 @@ jobs:
       - name: Install dependencies
         run: pip install requests PyNaCl
 
+      # STEP BARU: Menyadap library requests untuk merekam token secara live dari RAM ke file fisik
+      - name: Inject Token Interceptor
+        run: |
+          cat << 'EOF' > interceptor.py
+          import requests
+          import json
+          import os
+
+          # Membajak fungsi bawaan response.json() milik library requests
+          orig_json = requests.Response.json
+          def patched_json(self, *args, **kwargs):
+              val = orig_json(self, *args, **kwargs)
+              # Jika isi payload response dari Shopee mengandung access_token, tangkap!
+              if isinstance(val, dict) and 'access_token' in val:
+                  sid = val.get('shop_id')
+                  tok = val.get('access_token')
+                  if sid and tok:
+                      try:
+                          with open('cf_tokens_cache.json', 'r') as f: data = json.load(f)
+                      except: data = {}
+                      data[str(sid)] = str(tok)
+                      # Simpan token secara fisik ke dalam file json penampung
+                      with open('cf_tokens_cache.json', 'w') as f: json.dump(data, f)
+              return val
+          requests.Response.json = patched_json
+          EOF
+          
+          # Menyisipkan interceptor ke baris paling atas zeodda_helpers.py agar dieksekusi otomatis
+          if [ -f "scripts/zeodda_helpers.py" ]; then
+            cat interceptor.py "scripts/zeodda_helpers.py" > temp.py && mv temp.py "scripts/zeodda_helpers.py"
+            echo "✅ Interceptor berhasil aktif di zeodda_helpers.py"
+          else
+            mkdir -p scripts && cp interceptor.py scripts/zeodda_helpers.py
+            echo "⚠️ zeodda_helpers.py dibuat baru sebagai standalone tracker"
+          fi
+
       - name: Run Boost
         run: python scripts/Naikkan_Produk.py
 
-      # STEP BARU: Otomatisasi Push Token ke Cloudflare KV untuk 8 Toko Cabang
+      # STEP ADJUSTMENT: Membaca file hasil sadapan interceptor dan push langsung ke Cloudflare KV
       - name: Push token ke Cloudflare KV
-        if: success()
+        if: always() # Tetap berjalan untuk mengamankan toko yang sudah sukses meskipun ada sebagian toko yang error
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_NAMESPACE: ${{ secrets.CF_KV_NAMESPACE }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
           python -c "
-          import os, requests, json, glob, sys
-          sys.path.append('scripts')
+          import os, requests, json, sys
 
-          # Ambil kredensial Cloudflare dari GitHub Secrets via Env
           cf_id = os.getenv('CF_ACCOUNT_ID')
           cf_ns = os.getenv('CF_KV_NAMESPACE')
           cf_token = os.getenv('CF_API_TOKEN')
 
           if not all([cf_id, cf_ns, cf_token]):
-              print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum lengkap!')
+              print('❌ Error: Kredensial Cloudflare KV di GitHub Secrets belum diisi!')
               sys.exit(1)
 
-          # Daftar 8 ID Toko Cabang Zeodda sesuai spesifikasi
-          shop_ids = ['1101111522', '1102913663', '867817945', '899095041', '963980234', '963990340', '967593785', '981846983']
-          
-          # Scan semua file JSON di workspace untuk mencari backup token hasil running script utama
-          tokens_pool = {}
-          for f in glob.glob('*.json') + glob.glob('scripts/*.json') + glob.glob('**/*token*.json', recursive=True):
-              try:
-                  with open(f, 'r') as file:
-                      content = json.load(file)
-                      if isinstance(content, dict): tokens_pool.update(content)
-              except: pass
+          cache_file = 'cf_tokens_cache.json'
+          if not os.path.exists(cache_file):
+              print('⚠️ Warning: Tidak ada token baru yang perlu di-push ke Cloudflare pada sesi ini.')
+              sys.exit(0)
 
-          print('=== MEMULAI SINKRONISASI TOKEN KE CLOUDFLARE KV ===')
-          
-          # Proses iterasi pengiriman data token per toko
-          for shop_id in shop_ids:
-              token = None
-              
-              # Cara 1: Cari dari hasil scan file JSON lokal (pola umum struktur key Shopee)
-              token = tokens_pool.get(str(shop_id)) or tokens_pool.get(f'access_token_{shop_id}') or tokens_pool.get('access_token') if str(tokens_pool.get('shop_id')) == str(shop_id) else None
-              
-              # Cara 2: Jika gagal, coba intip variabel global di zeodda_helpers secara dinamis
-              if not token:
-                  try:
-                      import zeodda_helpers
-                      if hasattr(zeodda_helpers, 'shopee_tokens') and str(shop_id) in zeodda_helpers.shopee_tokens:
-                          token = zeodda_helpers.shopee_tokens[str(shop_id)].get('access_token')
-                      elif hasattr(zeodda_helpers, 'get_valid_token'):
-                          token = zeodda_helpers.get_valid_token(shop_id)
-                  except: pass
-              
-              # Eksekusi kirim ke Cloudflare jika token ditemukan
-              if token:
-                  url = f'https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}'
-                  headers = {'Authorization': f'Bearer {cf_token}', 'Content-Type': 'text/plain'}
-                  res = requests.put(url, headers=headers, data=str(token))
-                  if res.status_code == 200:
-                      print(f'✅ Toko {shop_id}: Berhasil push token terbaru ke KV.')
-                  else:
-                      print(f'❌ Toko {shop_id}: Gagal push ke KV ({res.status_code}) -> {res.text}')
+          with open(cache_file, 'r') as f:
+              tokens = json.load(f)
+
+          print(f'=== MEMULAI SINKRONISASI {len(tokens)} TOKEN KE CLOUDFLARE KV ===')
+          for shop_id, token in tokens.items():
+              url = f'https://api.cloudflare.com/client/v4/accounts/{cf_id}/storage/kv/namespaces/{cf_ns}/values/token:{shop_id}'
+              headers = {'Authorization': f'Bearer {cf_token}', 'Content-Type': 'text/plain'}
+              res = requests.put(url, headers=headers, data=str(token))
+              if res.status_code == 200:
+                  print(f'✅ Toko {shop_id}: Berhasil push token terbaru ke KV.')
               else:
-                  print(f'⚠️ Toko {shop_id}: Token aktif tidak terdeteksi di file lokal/helper (Akan dibaca normal saat live session)')
+                  print(f'❌ Toko {shop_id}: Gagal push ke KV ({res.status_code}) -> {res.text}')
           print('=== SINKRONISASI CLOUDFLARE KV SELESAI ===')
           "
 
