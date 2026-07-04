@@ -1,0 +1,36 @@
+name: Tracking Sync (Shopee + TikTok)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Sekali sehari sekitar jam 09:30 WIB (02:30 UTC). Menit sengaja BUKAN :00
+    # karena GitHub sendiri bilang jadwal tepat di awal jam paling rawan delay/dropped saat load tinggi.
+    - cron: '30 2 * * *'
+
+concurrency:
+  group: tracking-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run tracking sync
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
+          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
+          SHOPEE_REFRESH_TOKEN_867817945: ${{ secrets.SHOPEE_REFRESH_TOKEN_867817945 }}
+          SHOPEE_REFRESH_TOKEN_899095041: ${{ secrets.SHOPEE_REFRESH_TOKEN_899095041 }}
+          SHOPEE_REFRESH_TOKEN_963980234: ${{ secrets.SHOPEE_REFRESH_TOKEN_963980234 }}
+          SHOPEE_REFRESH_TOKEN_963990340: ${{ secrets.SHOPEE_REFRESH_TOKEN_963990340 }}
+          SHOPEE_REFRESH_TOKEN_967593785: ${{ secrets.SHOPEE_REFRESH_TOKEN_967593785 }}
+          SHOPEE_REFRESH_TOKEN_981846983: ${{ secrets.SHOPEE_REFRESH_TOKEN_981846983 }}
+          SHOPEE_REFRESH_TOKEN_1101111522: ${{ secrets.SHOPEE_REFRESH_TOKEN_1101111522 }}
+          SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
+        run: node scripts/tracking-sync.mjs
