@@ -1,0 +1,22 @@
+{
+  "optBase": "",
+  "shTokApp": "ItPfb0MPNaD6KhsVc65lT6p1gTh",
+  "shTokTable": "tbl8IOMhI1XaBIez",
+  "ttTokApp": "ItPfb0MPNaD6KhsVc65lT6p1gTh",
+  "ttTokTable": "tbl8IOMhI1XaBIez",
+  "ttNameCol": "Nama Toko Rumus",
+  "returnDays": 90,
+  "concurrency": 6,
+  "stuckDays": 7,
+  "stuckDays2": 14,
+  "stuckDays3": 40,
+  "skipFinalDays": 30,
+  "orderSources": [
+    { "active": true, "label": "HJB Faktur Blm Lunas", "app": "ECSHbDAzSale8Is1Oidl20skgee", "table": "tblSCZXYcA9xjfKc", "view": "vewWOL7xfI" },
+    { "active": true, "label": "HJB R.R Data Returan", "app": "Vm7RbyIefazbMmsnD2hl3tkYgbb", "table": "tbl5i23cgmKUwc8Y", "view": "vew0xoGuKb" },
+    { "active": true, "label": "HJB R.R by Admin", "app": "Vm7RbyIefazbMmsnD2hl3tkYgbb", "table": "tblYXfuYQKo3SK7S", "view": "vewA6KTRS2" },
+    { "active": true, "label": "MIP Faktur Blm Lunas", "app": "WZBzbLhYwaLT7DsqnDhl8CuxgLg", "table": "tblzekYMCUYw202R", "view": "vew8mIsMcI" },
+    { "active": true, "label": "SGJB Faktur Blm Lunas", "app": "M7icb3qJhawRMBsNyl2l6AYwgVf", "table": "tblKMwxS3Qv4Blyk", "view": "vewlCHSWo4" }
+  ],
+  "shopeeShopIds": [867817945, 899095041, 963980234, 963990340, 967593785, 981846983, 1101111522, 1102913663]
+}
