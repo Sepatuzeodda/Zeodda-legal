@@ -224,17 +224,27 @@ function mapStatus(desc) {
     if (/has been delivered/i.test(desc)) return 'Sudah Diterima Pembeli';
     if (/tiba di alamat tujuan/i.test(desc)) return 'Sudah Diterima Pembeli';
   }
-  if (/was lost/i.test(desc) || /dinyatakan hilang/i.test(desc)) return 'Hilang';
+  if (/was lost/i.test(desc) || /dinyatakan hilang/i.test(desc)) return `Hilang - ${desc}`;
   return desc;
 }
-function formatStatus(desc, ts, stuckDays, stuckDays2, stuckDays3) {
+function formatStatus(desc, ts, stuckDays, stuckDays2, stuckDays3, lostDays2, returDays2) {
   if (!desc) return desc;
   const hadReturn = /↩/.test(desc);
   let mapped = mapStatus(desc).replace(/↩\s*/g, '').trim();
-  const isLost = mapped === 'Hilang';
-  const isFinal = mapped === 'Sudah Diterima Pembeli' || /^Kembali ke Seller/.test(mapped) || isLost;
-  const isReturn = !isLost && (hadReturn || /^Kembali ke Seller/.test(mapped));
+  const isLost = /^Hilang/.test(mapped);
+  const isKembaliSeller = /^Kembali ke Seller/.test(mapped);
+  const isFinal = mapped === 'Sudah Diterima Pembeli' || isKembaliSeller || isLost;
+  const isReturn = !isLost && (hadReturn || isKembaliSeller);
   if (isReturn) mapped = 'Retur - ' + mapped;
+  // eskalasi: retur yang SUDAH sampai/final di seller tapi diam ≥N hari (belum diproses lanjut)
+  if (isKembaliSeller && ts && returDays2) {
+    const idleDays = (Date.now() - ts * 1000) / 86400000;
+    if (idleDays >= returDays2) mapped = mapped.replace(/^Retur/, `Retur ${returDays2}+`);
+  }
+  if (isLost && ts && lostDays2) {
+    const idleDays = (Date.now() - ts * 1000) / 86400000;
+    if (idleDays >= lostDays2) mapped = mapped.replace(/^Hilang/, `Hilang ${lostDays2}+`);
+  }
   if (ts && !isFinal) {
     const idleDays = (Date.now() - ts * 1000) / 86400000;
     if (stuckDays3 && idleDays >= stuckDays3) mapped = `Stuck ${stuckDays3}+ - ` + mapped;
@@ -246,13 +256,17 @@ function formatStatus(desc, ts, stuckDays, stuckDays2, stuckDays3) {
 function categorize(finalDesc) {
   if (!finalDesc) return 'Lainnya/Proses';
   if (finalDesc === 'Sudah Diterima Pembeli') return 'Diterima Pembeli';
+  const mRetur = finalDesc.match(/^Retur (\d+)\+/);
+  if (mRetur) return `Retur ${mRetur[1]}+`;
   if (/Kembali ke Seller/.test(finalDesc)) return 'Kembali ke Seller';
-  if (finalDesc === 'Hilang') return 'Hilang';
+  const mLost = finalDesc.match(/^Hilang (\d+)\+/);
+  if (mLost) return `Hilang ${mLost[1]}+`;
+  if (/^Hilang/.test(finalDesc)) return 'Hilang';
   const m = finalDesc.match(/^Stuck (\d+)\+/);
   if (m) return `Stuck ${m[1]}+`;
   return 'Lainnya/Proses';
 }
-function isFinalCategory(cat) { return cat === 'Diterima Pembeli' || cat === 'Kembali ke Seller' || cat === 'Hilang'; }
+function isFinalCategory(cat) { return cat === 'Diterima Pembeli' || cat === 'Kembali ke Seller' || cat === 'Hilang' || /^Hilang \d+\+$/.test(cat) || /^Retur \d+\+$/.test(cat); }
 
 // ═══ MAIN ═══
 const failedRows = [];
@@ -362,6 +376,8 @@ async function main() {
 
   const CONC = Math.max(1, Math.min(12, CFG.concurrency || 6));
   const STUCK = Math.max(1, CFG.stuckDays || 7), STUCK2 = Math.max(1, CFG.stuckDays2 || 14), STUCK3 = Math.max(1, CFG.stuckDays3 || 40);
+  const LOST2 = Math.max(1, CFG.lostDays2 || 3);
+  const RETUR2 = Math.max(1, CFG.returDays2 || 7);
   const updates = []; let done = 0, gotOk = 0, retOk = 0;
   const catCounts = {}, changedRows = [];
 
@@ -411,7 +427,7 @@ async function main() {
         desc = r.desc; ts = r.ts;
       }
       if (desc) {
-        const finalDesc = formatStatus(desc, ts, STUCK, STUCK2, STUCK3);
+        const finalDesc = formatStatus(desc, ts, STUCK, STUCK2, STUCK3, LOST2, RETUR2);
         const fields = { 'Status Terakhir': finalDesc }; if (ts) fields['Waktu Update Terakhir'] = ts * 1000;
         const grp = t._dupGroup || [t];
         for (const row of grp) {
@@ -441,7 +457,7 @@ async function main() {
 
   const summary = `Selesai: ${gotOk} diupdate (${retOk} retur Shopee), ${skipped} dilewati, ${failedRows.length} error`;
   log('ok', summary);
-  const catOrder = ['Diterima Pembeli', 'Kembali ke Seller', `Stuck ${STUCK}+`, `Stuck ${STUCK2}+`, `Stuck ${STUCK3}+`, 'Hilang', 'Lainnya/Proses'];
+  const catOrder = ['Diterima Pembeli', 'Kembali ke Seller', `Retur ${RETUR2}+`, `Stuck ${STUCK}+`, `Stuck ${STUCK2}+`, `Stuck ${STUCK3}+`, 'Hilang', `Hilang ${LOST2}+`, 'Lainnya/Proses'];
   const catLine = catOrder.filter(k => catCounts[k]).map(k => `${k}: ${catCounts[k]}`).join(' · ');
   if (catLine) log('info', `📊 Breakdown status: ${catLine}`);
   if (changedRows.length) log('info', `🔄 ${changedRows.length} order berubah status dibanding sebelumnya`);
