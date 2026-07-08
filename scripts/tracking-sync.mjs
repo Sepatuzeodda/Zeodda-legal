@@ -374,7 +374,7 @@ async function main() {
   if (dupRowsSaved) log('info', `🔗 ${dupGroupCount} No. Pesanan duplikat — ${dupRowsSaved} baris dihemat`);
   const uniqueTargets = groupKeys.map(k => { const g = orderGroups[k]; const rep = g.find(x => x.platform !== 'unknown') || g[0]; rep._dupGroup = g; return rep; });
 
-  const CONC = Math.max(1, Math.min(12, CFG.concurrency || 6));
+  const CONC = Math.max(1, Math.min(30, CFG.concurrency || 6));
   const STUCK = Math.max(1, CFG.stuckDays || 7), STUCK2 = Math.max(1, CFG.stuckDays2 || 14), STUCK3 = Math.max(1, CFG.stuckDays3 || 40);
   const LOST2 = Math.max(1, CFG.lostDays2 || 3);
   const RETUR2 = Math.max(1, CFG.returDays2 || 7);
