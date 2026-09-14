@@ -28,15 +28,34 @@ const LARK_APP_SECRET = env.LARK_APP_SECRET;
 // di script ini sama sekali.
 const WORKER_URL = env.WORKER_URL;
 const GITHUB_SYNC_SECRET = env.GITHUB_SYNC_SECRET;
-if (!LARK_APP_ID || !LARK_APP_SECRET || !WORKER_URL || !GITHUB_SYNC_SECRET) {
-  console.error('❌ Secret wajib belum lengkap (LARK_APP_ID/SECRET, WORKER_URL, GITHUB_SYNC_SECRET)');
-  process.exit(1);
+// Sebut PERSIS mana yg kosong -- pesan gabungan lama ("belum lengkap" tanpa rincian) bikin
+// user harus nebak sendiri secret mana yg kelupaan diisi (laporan user 15 Sep 2026, langsung
+// kejadian pas WORKER_URL/GITHUB_SYNC_SECRET baru ditambahkan).
+{
+  const kosong = [
+    !LARK_APP_ID && 'LARK_APP_ID', !LARK_APP_SECRET && 'LARK_APP_SECRET',
+    !WORKER_URL && 'WORKER_URL', !GITHUB_SYNC_SECRET && 'GITHUB_SYNC_SECRET',
+  ].filter(Boolean);
+  if (kosong.length) {
+    console.error(`❌ Secret/env kosong: ${kosong.join(', ')} -- cek Settings > Secrets and variables > Actions di repo ini.`);
+    process.exit(1);
+  }
 }
 
-// nama toko Shopee (kolom "Toko") → shop id — SAMAKAN dgn Tracking Logistik Auto.html kalau ada perubahan
+// nama toko Shopee (kolom "Toko") → shop id -- FALLBACK statis kalau fetch daftar toko live
+// (gh_shopee_shop_ids, lihat main()) gagal. 15 Sep 2026: laporan user "SM Zeodda Surabaya"
+// order-nya gagal terdeteksi ("Toko tidak terdeteksi di API manapun") PADAHAL nama tokonya
+// jelas ADA di baris Lark -- akar masalah: daftar ini cuma 7 toko, 4 toko HILANG (Zeodda
+// Surabaya, Vamo Bandung, Vamo Surabaya, Vamo Pekanbaru) drpd 11 toko yg sebenarnya terdaftar
+// di Maja Apps (PERF_CRON_SHOPS/Kelola Toko). BUKAN masalah data Lark, jangan diubah di Lark --
+// daftar ini yg kurang lengkap & gampang basi lagi kalau toko baru ditambah manual di sini.
+// Sekarang dilengkapi jadi 11 (SAMA dgn PERF_CRON_SHOPS), dan di main() ditimpa lagi dgn nama
+// LIVE dari Worker begitu fetch-nya berhasil -- daftar statis ini cuma jaring pengaman.
 const SHOPEE_MAP = {
   'SM Zeodda': 867817945, 'SM Zeodda Tangerang': 963990340, 'SM Zeodda Pekanbaru': 899095041,
-  'SM Zeodda Bandung': 967593785, 'SM Vamo Indonesia': 981846983, 'SM Vamo Tangerang': 963980234,
+  'SM Zeodda Bandung': 967593785, 'SM Zeodda Surabaya': 981831132,
+  'SM Vamo Indonesia': 981846983, 'SM Vamo Tangerang': 963980234, 'SM Vamo Bandung': 1145357332,
+  'SM Vamo Surabaya': 1102913663, 'SM Vamo Pekanbaru': 981842162,
   'SM Zeo Baby Kids': 1101111522,
 };
 const RETURN_STATUS_LABEL = { REQUESTED: 'Retur diajukan', PROCESSING: 'Retur diproses', ACCEPTED: 'Retur diterima penjual', SELLER_DISPUTE: 'Retur disengketakan', JUDGING: 'Retur ditinjau Shopee', REFUND_PAID: 'Dana dikembalikan', CANCELLED: 'Retur dibatalkan', CLOSED: 'Retur ditutup' };
@@ -74,7 +93,15 @@ const NAME_ALIAS = {
   'tpzeodda': 'ttzeodda',
 };
 const canonKey = s => { const k = normShop(s); return NAME_ALIAS[k] || k; };
-const SHOPEE_NORM = {}; for (const k in SHOPEE_MAP) SHOPEE_NORM[canonKey(k)] = SHOPEE_MAP[k];
+// let (bukan const): dibangun dulu dari SHOPEE_MAP statis (fallback), lalu ditimpa main() pakai
+// nama-nama toko LIVE begitu fetch gh_shopee_shop_ids berhasil -- supaya toko baru yg ditambah
+// lewat Kelola Toko langsung ikut cocok by nama juga (bukan cuma ikut lolos di brute-force).
+function buildShopeeNorm(map) {
+  const norm = {};
+  for (const k in map) norm[canonKey(k)] = map[k];
+  return norm;
+}
+let SHOPEE_NORM = buildShopeeNorm(SHOPEE_MAP);
 
 async function runPool(items, limit, worker) {
   let i = 0;
@@ -330,24 +357,59 @@ async function main() {
   const daysBack = Math.max(15, CFG.returnDays || 90);
   log('info', '⏳ Auth Lark...'); await larkAuth();
 
-  // Token Shopee TIDAK lagi disimpan di sini -- lihat catatan "SECRET" di atas. Daftar shop id
-  // masih dipakai buat tahu toko mana saja yg perlu di-cache retur-nya & jadi kandidat pencarian
-  // "toko tidak dikenal" di bawah.
-  const shopIds = CFG.shopeeShopIds || [];
-
-  // token TikTok dari tabel Lark (multi-app per toko)
+  // Baca tabel "Tabel Token Shopee/TikTok" SEKALI -- dipakai utk DUA hal: token TikTok (ttByName,
+  // spt sebelumnya) DAN daftar toko Shopee (shopeeFromLark, baru 15 Sep 2026). Permintaan user
+  // langsung nunjuk tabel ini ("untuk pencocokan toko kan bisa disini") -- tabel ini SUDAH
+  // dibaca script & SUDAH jadi tempat user menambah toko sehari-hari (kolom Shop ID + Nama Toko
+  // Rumus), jadi tidak perlu round-trip terpisah ke Worker lagi utk hal yg sama.
   const ttByName = {};
+  const shopeeFromLark = {}; // nama (persis "Nama Toko Rumus") -> shop id, dari SEMUA baris
   if (CFG.ttTokApp && CFG.ttTokTable) {
     const rows = await larkAllRecords(CFG.ttTokApp, CFG.ttTokTable, '');
     for (const r of rows) {
       const f = r.fields;
       const nm = larkText(f[CFG.ttNameCol]);
       const appKey = larkText(f['App Key']), appSecret = larkText(f['App Secret']), rt = larkText(f['Refresh Token']), cipher = larkText(f['Shop Cipher']), shopId = larkText(f['Shop ID']);
+      // Baris Shopee TIDAK PUNYA App Key/Secret/Refresh Token (itu kolom khusus TikTok) --
+      // makanya dulu baris begini dilewati BEGITU SAJA (`continue` di bawah), Shop ID-nya tidak
+      // pernah diambil sama sekali. Diambil di SINI, SEBELUM continue, spt tokonya SM Zeodda
+      // Surabaya di screenshot user (Shop ID + Nama Toko Rumus terisi, App Key dkk kosong).
+      // Syarat "!appKey && !appSecret" sengaja dipasang -- tanpa itu, baris TikTok yg App
+      // Key-nya kebetulan juga py Shop ID numerik akan ikut kepakai sbg id toko SHOPEE.
+      if (nm && /^\d+$/.test(shopId) && !appKey && !appSecret) shopeeFromLark[nm] = parseInt(shopId);
       if (!appKey || !appSecret || !rt) continue;
       const key = nm ? canonKey(nm) : canonKey(shopId);
       if (key) ttByName[key] = { appKey, appSecret, rt, cipher, recordId: r.record_id, name: nm || shopId };
     }
-    log('info', `${Object.keys(ttByName).length} toko TikTok punya kredensial lengkap`);
+    log('info', `${Object.keys(ttByName).length} toko TikTok punya kredensial lengkap, ${Object.keys(shopeeFromLark).length} toko Shopee ketemu di tabel ini`);
+  }
+
+  // Daftar & pencocokan toko Shopee -- 3 lapis, dari yg paling disukai user ke jaring pengaman
+  // terakhir. Toko baru cukup ditambahkan SEKALI di tabel Lark di atas (tempat yg SAMA sudah
+  // dipakai utk kredensial TikTok) -- tidak perlu diulang di tempat lain.
+  //   1) shopeeFromLark  -- dari pembacaan tabel barusan (SUMBER UTAMA, permintaan user).
+  //   2) Worker gh_shopee_shop_ids -- kalau tabel Lark di atas kosong/gagal dibaca (mis. base
+  //      token belum diisi/berubah); tetap dijaga sinkron dgn panel "Kelola Toko" Maja Apps.
+  //   3) SHOPEE_MAP/CFG.shopeeShopIds statis -- jaring pengaman terakhir kalau dua2nya gagal.
+  let shopIds = CFG.shopeeShopIds || [];
+  if (Object.keys(shopeeFromLark).length) {
+    shopIds = Object.values(shopeeFromLark);
+    SHOPEE_NORM = buildShopeeNorm(shopeeFromLark);
+    log('info', `${shopIds.length} toko Shopee (dari tabel Token Shopee/TikTok di Lark)`);
+  } else {
+    try {
+      const r = await fetch(WORKER_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'gh_shopee_shop_ids', secret: GITHUB_SYNC_SECRET }) }).then(x => x.json());
+      if (r.error) throw new Error(r.error);
+      if (Array.isArray(r.shops) && r.shops.length) {
+        shopIds = r.shops.map(s => s.id);
+        const mapLive = {}; for (const s of r.shops) if (s.name) mapLive[s.name] = s.id;
+        SHOPEE_NORM = buildShopeeNorm(mapLive);
+      }
+      log('info', `${shopIds.length} toko Shopee (tabel Lark kosong, fallback ke Worker/Kelola Toko)`);
+    } catch (e) {
+      log('warn', `Tabel Lark & Worker dua2nya gagal (${e.message}) -- pakai daftar statis cadangan (${shopIds.length} toko)`);
+    }
   }
 
   const shReturnCache = {}, ttCtx = {}, ttReturnCache = {};
