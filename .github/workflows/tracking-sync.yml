@@ -19,18 +19,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # 15 Sep 2026: SHOPEE_PARTNER_ID/KEY + 8 SHOPEE_REFRESH_TOKEN_<shopId> DIHAPUS -- token
+      # statis itu selalu basi (refresh_token Shopee berputar, worker Cloudflare merefresh
+      # tiap 3,5 jam & menimpa salinan yg di sini tidak pernah ikut ter-update). Panggilan
+      # Shopee sekarang lewat WORKER_URL (action "gh_shopee_proxy"), token selalu segar dari
+      # Worker sendiri. Hapus 10 secret lama itu dari repo Settings -> Secrets kalau mau
+      # beres2 (tidak wajib, sudah tidak dibaca sama sekali).
       - name: Run tracking sync
         env:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
-          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
-          SHOPEE_REFRESH_TOKEN_867817945: ${{ secrets.SHOPEE_REFRESH_TOKEN_867817945 }}
-          SHOPEE_REFRESH_TOKEN_899095041: ${{ secrets.SHOPEE_REFRESH_TOKEN_899095041 }}
-          SHOPEE_REFRESH_TOKEN_963980234: ${{ secrets.SHOPEE_REFRESH_TOKEN_963980234 }}
-          SHOPEE_REFRESH_TOKEN_963990340: ${{ secrets.SHOPEE_REFRESH_TOKEN_963990340 }}
-          SHOPEE_REFRESH_TOKEN_967593785: ${{ secrets.SHOPEE_REFRESH_TOKEN_967593785 }}
-          SHOPEE_REFRESH_TOKEN_981846983: ${{ secrets.SHOPEE_REFRESH_TOKEN_981846983 }}
-          SHOPEE_REFRESH_TOKEN_1101111522: ${{ secrets.SHOPEE_REFRESH_TOKEN_1101111522 }}
-          SHOPEE_REFRESH_TOKEN_1102913663: ${{ secrets.SHOPEE_REFRESH_TOKEN_1102913663 }}
+          WORKER_URL: https://zeodda-shopee-proxy.hjb-database.workers.dev
+          GITHUB_SYNC_SECRET: ${{ secrets.GITHUB_SYNC_SECRET }}
         run: node scripts/tracking-sync.mjs
