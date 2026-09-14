@@ -25,10 +25,16 @@ jobs:
       # Shopee sekarang lewat WORKER_URL (action "gh_shopee_proxy"), token selalu segar dari
       # Worker sendiri. Hapus 10 secret lama itu dari repo Settings -> Secrets kalau mau
       # beres2 (tidak wajib, sudah tidak dibaca sama sekali).
+      #
+      # Secret DI GITHUB namanya TRACKING_SYNC_SECRET, bukan GITHUB_SYNC_SECRET -- GitHub
+      # melarang nama secret diawali "GITHUB_" (prefix dicadangkan). Nilainya harus SAMA PERSIS
+      # dgn secret `GITHUB_SYNC_SECRET` yg di-set di Cloudflare Worker (`wrangler secret put`);
+      # env var yg dibaca script (GITHUB_SYNC_SECRET, kiri "=") sengaja TETAP disamakan dgn nama
+      # di Worker, cuma sumbernya (kanan) yg beda nama krn batasan GitHub itu.
       - name: Run tracking sync
         env:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           WORKER_URL: https://zeodda-shopee-proxy.hjb-database.workers.dev
-          GITHUB_SYNC_SECRET: ${{ secrets.GITHUB_SYNC_SECRET }}
+          GITHUB_SYNC_SECRET: ${{ secrets.TRACKING_SYNC_SECRET }}
         run: node scripts/tracking-sync.mjs
