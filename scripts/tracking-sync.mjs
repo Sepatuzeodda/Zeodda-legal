@@ -18,10 +18,18 @@ const VER = '202309';
 const env = process.env;
 const LARK_APP_ID = env.LARK_APP_ID;
 const LARK_APP_SECRET = env.LARK_APP_SECRET;
-const SHOPEE_PARTNER_ID = env.SHOPEE_PARTNER_ID;
-const SHOPEE_PARTNER_KEY = env.SHOPEE_PARTNER_KEY;
-if (!LARK_APP_ID || !LARK_APP_SECRET || !SHOPEE_PARTNER_ID || !SHOPEE_PARTNER_KEY) {
-  console.error('❌ Secret wajib belum lengkap (LARK_APP_ID/SECRET, SHOPEE_PARTNER_ID/KEY)');
+// 15 Sep 2026: SHOPEE_PARTNER_ID/KEY + SHOPEE_REFRESH_TOKEN_<shopId> (8 secret) DIHAPUS --
+// refresh_token Shopee yg disimpan statis di sini SELALU basi (Shopee mengeluarkan
+// refresh_token BARU tiap dipakai, worker Cloudflare sendiri sudah merefresh tiap 3,5 jam
+// & menimpa salinan yg di sini tidak pernah ikut ter-update -- laporan user 15 Sep 2026:
+// hampir semua order gagal serentak dgn "Token Shopee tidak tersedia"). Sekarang panggilan
+// Shopee lewat WORKER_URL (action "gh_shopee_proxy") yg SELALU pakai token segar dari KV
+// Worker sendiri -- lihat shopeeGet() di bawah. Token/signing Shopee tidak lagi ditangani
+// di script ini sama sekali.
+const WORKER_URL = env.WORKER_URL;
+const GITHUB_SYNC_SECRET = env.GITHUB_SYNC_SECRET;
+if (!LARK_APP_ID || !LARK_APP_SECRET || !WORKER_URL || !GITHUB_SYNC_SECRET) {
+  console.error('❌ Secret wajib belum lengkap (LARK_APP_ID/SECRET, WORKER_URL, GITHUB_SYNC_SECRET)');
   process.exit(1);
 }
 
@@ -126,23 +134,19 @@ async function larkAllRecords(app, table, view) {
   return items;
 }
 
-// ═══ SHOPEE ═══
-function shopeeSign(path, shopId, at) { const ts = Math.floor(Date.now() / 1000); const base = (shopId && at) ? `${SHOPEE_PARTNER_ID}${path}${ts}${at}${shopId}` : `${SHOPEE_PARTNER_ID}${path}${ts}`; return { ts, sign: hmacHex(SHOPEE_PARTNER_KEY, base) }; }
-async function shopeeGet(path, shopId, at, extra = {}) {
-  const { ts, sign } = shopeeSign(path, shopId, at);
-  const p = new URLSearchParams({ partner_id: SHOPEE_PARTNER_ID, timestamp: ts, sign, ...(shopId ? { shop_id: shopId } : {}), ...(at ? { access_token: at } : {}), ...extra });
-  return fetchJsonRetry(`${SHOPEE_HOST}${path}?${p}`, {}, r => isRateLimitMsg(r.error) || isRateLimitMsg(r.message), `SP ${path}`);
+// ═══ SHOPEE (lewat proxy Worker -- lihat catatan "SECRET" di atas utk alasannya) ═══
+// Worker yg pegang & merawat access_token/refresh_token; script ini cuma kirim shop_id+path
+// dan terima hasilnya. `extra` = query param GET (persis param yg dulu dikirim langsung ke
+// Shopee). Rate-limit/retry TETAP di sini (fetchJsonRetry), Worker cuma menangani auth.
+async function shopeeGet(path, shopId, extra = {}) {
+  const body = { action: 'gh_shopee_proxy', secret: GITHUB_SYNC_SECRET, shop_id: shopId, method: 'GET', payload: extra, path };
+  const r = await fetchJsonRetry(WORKER_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    (r) => isRateLimitMsg(r?.data?.error) || isRateLimitMsg(r?.data?.message) || isRateLimitMsg(r?.error), `SP ${path}`);
+  if (r?.error) return { error: r.error }; // gagal di sisi Worker sendiri (mis. token toko itu belum pernah ada)
+  return r.data || {};
 }
-async function shopeeRefresh(shopId, rt) {
-  const pid = parseInt(SHOPEE_PARTNER_ID) || 0;
-  const path = '/api/v2/auth/access_token/get'; const { ts, sign } = shopeeSign(path, null, null);
-  const d = await fetch(`${SHOPEE_HOST}${path}?partner_id=${pid}&timestamp=${ts}&sign=${sign}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: rt, shop_id: parseInt(shopId) || shopId, partner_id: pid }) }).then(r => r.json());
-  if (d.error && d.error !== '') throw new Error(d.message || d.error);
-  if (!d.access_token) throw new Error('tidak ada access_token');
-  return d.access_token;
-}
-async function shopeeForwardLatest(shopId, at, orderSn) {
-  const td = await shopeeGet('/api/v2/logistics/get_tracking_info', shopId, at, { order_sn: orderSn });
+async function shopeeForwardLatest(shopId, orderSn) {
+  const td = await shopeeGet('/api/v2/logistics/get_tracking_info', shopId, { order_sn: orderSn });
   if (td.error && td.error !== '') return { err: td.error };
   const ev = td.response?.tracking_list || td.response?.history || td.response?.tracking_info || [];
   if (!ev.length) return { desc: '', ts: 0 };
@@ -150,19 +154,19 @@ async function shopeeForwardLatest(shopId, at, orderSn) {
   const gD = e => e.description || e.message || e.status || e.status_description || e.detail || '';
   const l = [...ev].sort((a, b) => gTs(b) - gTs(a))[0]; return { desc: gD(l), ts: gTs(l) };
 }
-async function shopeeReverse(shopId, at, returnSn) {
-  const r = await shopeeGet('/api/v2/returns/get_reverse_tracking_info', shopId, at, { return_sn: returnSn });
+async function shopeeReverse(shopId, returnSn) {
+  const r = await shopeeGet('/api/v2/returns/get_reverse_tracking_info', shopId, { return_sn: returnSn });
   if (r.error && r.error !== '') return { err: r.error };
   const resp = r.response || {}; const ev = resp.tracking_info || resp.post_return_logistics_tracking_info || [];
   if (ev.length) { const l = [...ev].sort((a, b) => (b.update_time || 0) - (a.update_time || 0))[0]; return { desc: l.tracking_description || '', ts: l.update_time || 0 }; }
   return { desc: '', ts: resp.reverse_logistics_update_time || 0, logiStatus: resp.reverse_logistics_status || '' };
 }
-async function shopeeReturnMap(shopId, at, daysBack) {
+async function shopeeReturnMap(shopId, daysBack) {
   const map = {}; const now = Math.floor(Date.now() / 1000); const CHUNK = 15 * 86400; const from0 = now - daysBack * 86400;
   for (let wf = from0; wf < now; wf += CHUNK) {
     const wt = Math.min(wf + CHUNK - 1, now); let pg = 1, more = true;
     while (more) {
-      const r = await shopeeGet('/api/v2/returns/get_return_list', shopId, at, { page_no: pg, page_size: 100, create_time_from: wf, create_time_to: wt });
+      const r = await shopeeGet('/api/v2/returns/get_return_list', shopId, { page_no: pg, page_size: 100, create_time_from: wf, create_time_to: wt });
       if (r.error && r.error !== '') break;
       const list = r.response?.return || [];
       for (const ret of list) { if (ret.order_sn) map[ret.order_sn] = { return_sn: ret.return_sn, status: ret.status || '', update_time: ret.update_time || 0 }; }
@@ -207,6 +211,55 @@ async function ttTracking(ctx, cipher, orderId) {
 async function ttOwnsOrder(ctx, cipher, orderId) {
   const r = await ttCall(ctx, { method: 'GET', path: `order/${VER}/orders`, query: { ids: String(orderId) }, shopCipher: cipher });
   return (r.data?.orders || []).some(o => String(o.id) === String(orderId));
+}
+
+// ── TikTok RETUR (return_refund API) — jalur ke-2 sama seperti Shopee, biar retur SETELAH "Diterima" ikut kedeteksi ──
+const TT_RETURN_LABEL = {
+  RETURN_OR_REFUND_REQUEST_PENDING: 'Retur diajukan',
+  REFUND_OR_RETURN_REQUEST_REJECT: 'Retur ditolak seller',
+  AWAITING_BUYER_SHIP: 'Menunggu pembeli kirim retur',
+  BUYER_SHIPPED_ITEM: 'Pembeli sudah kirim retur',
+  REJECT_RECEIVE_PACKAGE: 'Seller tolak terima paket retur',
+  RETURN_OR_REFUND_REQUEST_SUCCESS: 'Dana dikembalikan',
+  RETURN_OR_REFUND_REQUEST_CANCEL: 'Retur dibatalkan',
+  RETURN_OR_REFUND_REQUEST_COMPLETE: 'Retur/refund selesai',
+  AWAITING_BUYER_RESPONSE: 'Menunggu respon pembeli',
+  REPLACEMENT_REQUEST_PENDING: 'Penggantian diajukan',
+  REPLACEMENT_REQUEST_REJECT: 'Penggantian ditolak',
+  REPLACEMENT_REQUEST_REFUND_SUCCESS: 'Penggantian jadi refund',
+  REPLACEMENT_REQUEST_CANCEL: 'Penggantian dibatalkan',
+  REPLACEMENT_REQUEST_COMPLETE: 'Penggantian selesai',
+};
+const TT_RETURN_FINAL = new Set(['RETURN_OR_REFUND_REQUEST_SUCCESS', 'RETURN_OR_REFUND_REQUEST_COMPLETE']);
+function findReturnList(data) {
+  if (!data) return [];
+  for (const k of ['return_order_list', 'returns', 'return_list', 'order_return_list']) if (Array.isArray(data[k])) return data[k];
+  for (const k in data) if (Array.isArray(data[k]) && data[k][0] && data[k][0].return_status) return data[k];
+  return [];
+}
+async function ttReturnMap(ctx, cipher, daysBack, shopLabel) {
+  const map = {}; const now = Math.floor(Date.now() / 1000); const from0 = now - daysBack * 86400;
+  let pageToken = '', more = true, guard = 0, dbgDone = false;
+  while (more && guard < 40) {
+    guard++;
+    const query = { page_size: 50, sort_field: 'update_time', sort_order: 'DESC' }; if (pageToken) query.page_token = pageToken;
+    const r = await ttCall(ctx, { method: 'POST', path: `return_refund/${VER}/returns/search`, shopCipher: cipher, query, body: { create_time_ge: from0 } });
+    if (r.code !== 0) { log('warn', `Retur TikTok "${shopLabel}": API gagal (${r.code} ${r.message || ''}) — cek scope "seller.return_refund.basic"`); break; }
+    const list = findReturnList(r.data);
+    if (!dbgDone) { dbgDone = true; log('info', `DEBUG retur "${shopLabel}": keys respons data = [${Object.keys(r.data || {}).join(', ')}], array retur ditemukan = ${list.length} item`); }
+    for (const item of list) {
+      const oids = item.order_ids || (item.order_id ? [item.order_id] : []);
+      const ts = item.update_time || item.create_time || 0;
+      for (const oid of oids) {
+        const prev = map[oid];
+        if (!prev || ts > prev.ts) map[oid] = { status: item.return_status, ts, trackingNumber: item.return_tracking_number || '' };
+      }
+    }
+    pageToken = r.data?.next_page_token || r.data?.page_token || '';
+    more = !!pageToken && list.length > 0;
+  }
+  log('info', `Retur TikTok "${shopLabel}": ${Object.keys(map).length} order ada data retur (${daysBack} hari terakhir)`);
+  return map;
 }
 
 // ═══ STATUS ═══
@@ -277,11 +330,10 @@ async function main() {
   const daysBack = Math.max(15, CFG.returnDays || 90);
   log('info', '⏳ Auth Lark...'); await larkAuth();
 
-  // token Shopee dari GitHub Secrets (SHOPEE_REFRESH_TOKEN_<shop_id>), sudah di-maintain workflow lain
+  // Token Shopee TIDAK lagi disimpan di sini -- lihat catatan "SECRET" di atas. Daftar shop id
+  // masih dipakai buat tahu toko mana saja yg perlu di-cache retur-nya & jadi kandidat pencarian
+  // "toko tidak dikenal" di bawah.
   const shopIds = CFG.shopeeShopIds || [];
-  const shRt = {};
-  for (const sid of shopIds) { const v = env[`SHOPEE_REFRESH_TOKEN_${sid}`]; if (v) shRt[sid] = v; }
-  log('info', `${Object.keys(shRt).length}/${shopIds.length} refresh token Shopee ditemukan di secrets`);
 
   // token TikTok dari tabel Lark (multi-app per toko)
   const ttByName = {};
@@ -298,7 +350,7 @@ async function main() {
     log('info', `${Object.keys(ttByName).length} toko TikTok punya kredensial lengkap`);
   }
 
-  const shAT = {}, shReturnCache = {}, ttCtx = {};
+  const shReturnCache = {}, ttCtx = {}, ttReturnCache = {};
 
   // peta opsi nama toko: scan semua base terkait
   const sources = (CFG.orderSources || []).filter(s => s.active !== false);
@@ -340,10 +392,10 @@ async function main() {
   }
   log('info', `Target: ${targets.length} order, ${skipped} dilewati${skippedFinal ? `, ${skippedFinal} skip (final & > ${skipFinalDays} hari)` : ''}`);
 
-  // setup token — paralel per toko
+  // Cache retur per toko -- tokennya sendiri sudah beres di Worker (gh_shopee_proxy), tidak
+  // ada lagi "setup token" di sini.
   await Promise.all(shopIds.map(async sid => {
-    const rt = shRt[sid]; if (!rt) { log('warn', `Shop ${sid}: tidak ada refresh token di secrets`); return; }
-    try { shAT[sid] = await shopeeRefresh(sid, rt); shReturnCache[sid] = await shopeeReturnMap(sid, shAT[sid], daysBack); }
+    try { shReturnCache[sid] = await shopeeReturnMap(sid, daysBack); }
     catch (e) { log('err', `Setup Shopee ${sid}: ${e.message}`); }
   }));
   const ttKeys = Object.keys(ttByName);
@@ -361,6 +413,10 @@ async function main() {
       ttCtx[key] = { ctx, cipher };
       const upF = { 'Access Token': tk.access_token, 'Refresh Token': tk.refresh_token }; if (cipher) upF['Shop Cipher'] = cipher;
       larkFetch('PUT', `/open-apis/bitable/v1/apps/${CFG.ttTokApp}/tables/${CFG.ttTokTable}/records/${entry.recordId}`, { fields: upF }).catch(() => {});
+      if (cipher) {
+        try { ttReturnCache[key] = await ttReturnMap(ctx, cipher, daysBack, entry.name); }
+        catch (e) { log('warn', `Retur TikTok "${entry.name}": ${e.message}`); }
+      }
     } catch (e) { log('err', `Setup TikTok "${entry.name}": ${e.message}`); }
   }));
   log('ok', `Setup selesai: ${shopIds.length} toko Shopee, ${ttKeys.length} toko TikTok`);
@@ -389,42 +445,50 @@ async function main() {
         let found = false;
         const isNumOnly = /^\d{12,}$/.test(t.orderSn);
         if (!isNumOnly) {
-          for (const sid of shopIds) { const at = shAT[sid]; if (!at) continue; const ft = await shopeeForwardLatest(sid, at, t.orderSn); if (!ft.err && ft.desc) { found = true; t.platform = 'shopee'; t.shopId = sid; break; } }
+          for (const sid of shopIds) { const ft = await shopeeForwardLatest(sid, t.orderSn); if (!ft.err && ft.desc) { found = true; t.platform = 'shopee'; t.shopId = sid; break; } }
         }
         if (!found && isNumOnly) {
           for (const key of ttKeys) { const e = ttCtx[key]; if (!e || !e.cipher) continue; if (await ttOwnsOrder(e.ctx, e.cipher, t.orderSn)) { found = true; t.platform = 'tiktok'; t.toko = key; break; } }
         }
         if (!found && isNumOnly) {
-          for (const sid of shopIds) { const at = shAT[sid]; if (!at) continue; const ft = await shopeeForwardLatest(sid, at, t.orderSn); if (!ft.err && ft.desc) { found = true; t.platform = 'shopee'; t.shopId = sid; break; } }
+          for (const sid of shopIds) { const ft = await shopeeForwardLatest(sid, t.orderSn); if (!ft.err && ft.desc) { found = true; t.platform = 'shopee'; t.shopId = sid; break; } }
         }
         if (!found) { log('warn', `${t.orderSn} · toko tidak terdeteksi`); failGroup(t, 'Toko tidak terdeteksi di API manapun'); return; }
       }
 
       if (t.platform === 'shopee') {
-        const at = shAT[t.shopId];
-        if (!at) { failGroup(t, 'Token Shopee tidak tersedia'); return; }
         const retInfo = (shReturnCache[t.shopId] || {})[t.orderSn];
         if (retInfo) {
           let revLbl = '';
-          if (retInfo.return_sn) { const rt = await shopeeReverse(t.shopId, at, retInfo.return_sn); if (!rt.err && rt.desc && rt.ts >= ts) { desc = `↩ ${rt.desc}`; ts = rt.ts; } else if (!rt.err && !rt.desc) { revLbl = RETURN_STATUS_LABEL[rt.logiStatus] || ''; } }
-          const ft = await shopeeForwardLatest(t.shopId, at, t.orderSn);
+          if (retInfo.return_sn) { const rt = await shopeeReverse(t.shopId, retInfo.return_sn); if (!rt.err && rt.desc && rt.ts >= ts) { desc = `↩ ${rt.desc}`; ts = rt.ts; } else if (!rt.err && !rt.desc) { revLbl = RETURN_STATUS_LABEL[rt.logiStatus] || ''; } }
+          const ft = await shopeeForwardLatest(t.shopId, t.orderSn);
           if (!ft.err && ft.desc && ft.ts >= ts) { desc = `↩ ${ft.desc}`; ts = ft.ts; }
           if (!desc) { desc = `↩ ${revLbl || RETURN_STATUS_LABEL[retInfo.status] || retInfo.status || 'Pengembalian'}`; ts = ts || retInfo.update_time; }
           retOk++;
         } else {
-          const ft = await shopeeForwardLatest(t.shopId, at, t.orderSn);
+          const ft = await shopeeForwardLatest(t.shopId, t.orderSn);
           if (ft.err) { log('warn', `${t.orderSn} · ${ft.err}`); failGroup(t, `Shopee: ${ft.err}`); return; }
           if (!ft.desc) { failGroup(t, 'Tidak ada event tracking Shopee'); return; }
           desc = ft.desc; ts = ft.ts;
         }
       } else {
-        const e = ttCtx[canonKey(t.toko)];
+        const ttKey = canonKey(t.toko);
+        const e = ttCtx[ttKey];
         if (!e) { failGroup(t, `TikTok "${t.toko}" tidak siap/token tidak ada`); return; }
         if (!e.cipher) { failGroup(t, `${t.toko}: shop_cipher tidak ada`); return; }
+        // jalur 1: retur (return_refund API) — dicek dulu, kadang lebih baru dari jalur maju
+        const retInfo = (ttReturnCache[ttKey] || {})[t.orderSn];
+        if (retInfo) {
+          if (TT_RETURN_FINAL.has(retInfo.status)) { desc = 'Pesanan dikembalikan ke Agen / Penjual'; ts = retInfo.ts; }
+          else { desc = `↩ ${TT_RETURN_LABEL[retInfo.status] || retInfo.status}`; ts = retInfo.ts; }
+        }
+        // jalur 2: tracking maju — menang kalau timestamp-nya sama/lebih baru dari retur
         const r = await ttTracking(e.ctx, e.cipher, t.orderSn);
-        if (r.err) { log('warn', `${t.orderSn} · TT ${r.err}`); failGroup(t, `TikTok: ${r.err}`); return; }
-        if (!r.desc) { failGroup(t, 'Tidak ada event tracking TikTok'); return; }
-        desc = r.desc; ts = r.ts;
+        if (!r.err && r.desc && r.ts >= ts) { desc = r.desc; ts = r.ts; }
+        if (!desc) {
+          if (r.err) { log('warn', `${t.orderSn} · TT ${r.err}`); failGroup(t, `TikTok: ${r.err}`); return; }
+          failGroup(t, 'Tidak ada event tracking TikTok'); return;
+        }
       }
       if (desc) {
         const finalDesc = formatStatus(desc, ts, STUCK, STUCK2, STUCK3, LOST2, RETUR2);
