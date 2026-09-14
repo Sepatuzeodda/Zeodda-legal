@@ -20,5 +20,6 @@
     { "active": true, "label": "MIP Faktur Blm Lunas", "app": "WZBzbLhYwaLT7DsqnDhl8CuxgLg", "table": "tblzekYMCUYw202R", "view": "vew8mIsMcI" },
     { "active": true, "label": "SGJB Faktur Blm Lunas", "app": "M7icb3qJhawRMBsNyl2l6AYwgVf", "table": "tblKMwxS3Qv4Blyk", "view": "vewlCHSWo4" }
   ],
-  "shopeeShopIds": [867817945, 899095041, 963980234, 963990340, 967593785, 981846983, 1101111522, 1102913663]
+  "_comment_shopeeShopIds": "Jaring pengaman TERAKHIR -- cuma kepakai kalau tabel Lark Token Shopee/TikTok DAN Worker gh_shopee_shop_ids dua-duanya gagal dibaca. Jalur normal sehari-hari TIDAK baca ini. Tambah toko baru? Cukup di tabel Lark itu, bukan di sini.",
+  "shopeeShopIds": [867817945, 899095041, 963980234, 963990340, 967593785, 981831132, 981842162, 981846983, 1101111522, 1102913663, 1145357332]
 }
