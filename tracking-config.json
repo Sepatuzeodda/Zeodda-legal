@@ -17,6 +17,7 @@
     { "active": true, "label": "HJB Faktur Blm Lunas", "app": "ECSHbDAzSale8Is1Oidl20skgee", "table": "tblSCZXYcA9xjfKc", "view": "vewWOL7xfI" },
     { "active": true, "label": "HJB R.R Data Returan", "app": "Vm7RbyIefazbMmsnD2hl3tkYgbb", "table": "tbl5i23cgmKUwc8Y", "view": "vew0xoGuKb" },
     { "active": true, "label": "HJB R.R by Admin", "app": "Vm7RbyIefazbMmsnD2hl3tkYgbb", "table": "tblYXfuYQKo3SK7S", "view": "vewA6KTRS2", "returReasonCol": "Ket Komplainan", "banding": true },
+    { "active": true, "label": "MIP R.R by Admin", "app": "O0dubQzklaSaigseFSBlxhDvg2f", "table": "tblkUhpyeOPhbnXe", "view": "vew3oveBFG", "returReasonCol": "Ket Komplainan", "banding": true },
     { "active": true, "label": "MIP Faktur Blm Lunas", "app": "WZBzbLhYwaLT7DsqnDhl8CuxgLg", "table": "tblzekYMCUYw202R", "view": "vew8mIsMcI" },
     { "active": true, "label": "SGJB Faktur Blm Lunas", "app": "M7icb3qJhawRMBsNyl2l6AYwgVf", "table": "tblKMwxS3Qv4Blyk", "view": "vewlCHSWo4" }
   ],
