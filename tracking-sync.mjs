@@ -69,7 +69,8 @@ function log(type, msg) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const isRateLimitMsg = s => /too many request|rate limit|frequent|too_many_request/i.test(String(s || ''));
+// "Internal error. Retry later" (TikTok 36009003) ikut diulang -- sekali muncul, seluruh retur toko itu terbaca 0 (kejadian 30 Sep 2026)
+const isRateLimitMsg = s => /too many request|rate limit|frequent|too_many_request|retry later/i.test(String(s || ''));
 async function fetchJsonRetry(url, fetchOpts, isRateLimited, label, tries = 4) {
   let delay = 1500;
   for (let i = 0; i < tries; i++) {
@@ -202,7 +203,7 @@ async function shopeeReturnPage(shopId, pageNo) {
   return r.response?.return || [];
 }
 async function shopeeReturnMap(shopId, daysBack) {
-  const map = {};
+  const map = {}, dmap = {}; // dmap: retur yg DIBANDING (punya dispute_reason) -- bisa beda dgn retur terbaru order itu
   const cutoff = Math.floor(Date.now() / 1000) - daysBack * 86400;
 
   // 1) halaman terakhir: gandakan sampai kosong, lalu binary search
@@ -227,6 +228,8 @@ async function shopeeReturnMap(shopId, daysBack) {
     if (!rawReturnDebugPrinted && list.length) { rawReturnDebugPrinted = true; log('info', `🔍 DEBUG return_list MENTAH (1 contoh, shop ${shopId}): ${JSON.stringify(list[0])}`); }
     for (const ret of list) {
       if (!ret.order_sn) continue;
+      const pd = dmap[ret.order_sn];
+      if ((ret.dispute_reason || []).length && (!pd || (pd.update_time || 0) < (ret.update_time || 0))) dmap[ret.order_sn] = { status: ret.status || '', update_time: ret.update_time || 0 };
       const prev = map[ret.order_sn];
       // 1 order bisa punya >1 pengajuan retur -- simpan yg paling baru
       if (prev && (prev.update_time || 0) >= (ret.update_time || 0)) continue;
@@ -236,6 +239,7 @@ async function shopeeReturnMap(shopId, daysBack) {
     if (times.length && Math.max(...times) < cutoff) break;
     await sleep(160);
   }
+  for (const sn in dmap) if (map[sn]) map[sn].dispute = dmap[sn];
   return map;
 }
 // kode `reason` dari Shopee -- yg di bawah SUDAH DIVERIFIKASI ke data asli toko Zeodda (19 Sep
@@ -263,24 +267,47 @@ function formatReturnReason(code, textReason) {
   if (textReason) return label ? `${label} - ${textReason}` : textReason;
   return label;
 }
-// Status banding (sengketa retur) -- Shopee TIDAK expose teks alasan keputusan, cuma status+waktu
-// (get_return_list, sudah ditarik, 0 API tambahan). CANCELLED/REFUND_PAID di sini SELALU dibaca
-// sbg hasil banding walau retur itu sebenarnya tidak pernah disengketakan (API tidak simpan
-// histori "pernah SELLER_DISPUTE apa tidak") -- disepakati user krn tetap lebih berguna drpd kosong.
-const DISPUTE_STATUS_LABEL = {
-  SELLER_DISPUTE: 'Sedang Banding', JUDGING: 'Sedang Ditinjau Shopee',
-  CANCELLED: 'Banding Disetujui (Retur Dibatalkan)', REFUND_PAID: 'Banding Ditolak (Dana Dikembalikan)',
-};
-function fmtDateID(ts) {
-  if (!ts) return '';
-  const d = new Date(ts * 1000), p = n => String(n).padStart(2, '0');
-  return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()}`;
+// ═══ BANDING (30 Sep 2026) ═══ -- isi kolom Status Banding / Status Aju / Tgl Ajuin / Tgl Close
+// (sumber yg dikonfigur "banding": true, mis. HJB R.R by Admin). Keterangan MP TIDAK ditulis lagi.
+// Penanda "pernah dibanding" yg BENAR (dulu salah: semua retur CANCELLED dianggap banding disetujui,
+// padahal dari 788 banding 120 hari tak satu pun berakhir CANCELLED):
+//  - Shopee: field dispute_reason terisi (ikut di get_return_list, 0 panggilan tambahan).
+//    Status akhirnya DIVERIFIKASI user di Seller Center 30 Sep 2026: CLOSED = Disetujui, ACCEPTED = Ditolak
+//    (dicocokkan jg ke isian manual staf: 21/21 CLOSED = Disetujui, ACCEPTED 8 Ditolak vs 2 Disetujui).
+//  - TikTok: arbitration_status di returns/search. CLOSED dianggap Ditolak (keputusan user).
+// API tidak memberi tanggal pengajuan banding: Tgl Ajuin = update_time saat sync pertama kali melihat
+// banding masih On Proses (≤1 hari meleset krn sync harian). Tgl Close = update_time status final.
+const SHOPEE_BANDING = { SELLER_DISPUTE: 'On Proses', JUDGING: 'On Proses', CLOSED: 'Disetujui', ACCEPTED: 'Ditolak' };
+const TT_BANDING = { IN_PROGRESS: 'On Proses', SUPPORT_SELLER: 'Disetujui', SUPPORT_BUYER: 'Ditolak', CLOSED: 'Ditolak' };
+const BANDING_FINAL = new Set(['Disetujui', 'Ditolak']);
+const BANDING_BOLEH_TIMPA = new Set(['', 'On Proses', 'Belum Banding']); // isian manual lain (Dibiayakan, Tidak Banding, dst) tak disentuh
+const seenBandingUnknown = new Set();
+function bandingOf(shopRet, ttRet) {
+  if (shopRet?.dispute) {
+    const hasil = SHOPEE_BANDING[shopRet.dispute.status];
+    if (!hasil) { seenBandingUnknown.add(`Shopee ${shopRet.dispute.status}`); return null; }
+    return { hasil, ts: shopRet.dispute.update_time };
+  }
+  if (ttRet?.arb) {
+    const hasil = TT_BANDING[ttRet.arb.status];
+    if (!hasil) { seenBandingUnknown.add(`TikTok ${ttRet.arb.status}`); return null; }
+    return { hasil, ts: ttRet.arb.ts };
+  }
+  return null;
 }
-function formatDisputeStatus(status, updateTime) {
-  const label = DISPUTE_STATUS_LABEL[status];
-  if (!label) return '';
-  const d = fmtDateID(updateTime);
-  return d ? `${label} (${d})` : label;
+function bandingFields(row, b) {
+  const cur = row.banding;
+  if (!b || !cur || !row.cols || !BANDING_BOLEH_TIMPA.has(cur.status)) return {};
+  const f = {}, has = (c) => row.cols.has(c);
+  if (has('Status Banding') && cur.status !== b.hasil) f['Status Banding'] = b.hasil;
+  if (b.hasil === 'On Proses') {
+    if (has('Status Aju') && cur.aju !== 'On Proses') f['Status Aju'] = 'On Proses';
+    if (has('Tgl Ajuin') && !cur.tglAjuin && b.ts) f['Tgl Ajuin'] = noonWib(b.ts);
+  } else {
+    if (has('Status Aju') && cur.aju !== 'Close') f['Status Aju'] = 'Close';
+    if (has('Tgl Close') && !cur.tglClose && b.ts) f['Tgl Close'] = noonWib(b.ts);
+  }
+  return f;
 }
 
 // ═══ TIKTOK ═══
@@ -363,7 +390,7 @@ function findReturnList(data) {
   return [];
 }
 async function ttReturnMap(ctx, cipher, daysBack, shopLabel) {
-  const map = {}; const now = Math.floor(Date.now() / 1000); const from0 = now - daysBack * 86400;
+  const map = {}, amap = {}; const now = Math.floor(Date.now() / 1000); const from0 = now - daysBack * 86400; // amap: retur yg masuk arbitrase (banding)
   let pageToken = '', more = true, guard = 0, dbgDone = false;
   while (more && guard < 40) {
     guard++;
@@ -377,6 +404,7 @@ async function ttReturnMap(ctx, cipher, daysBack, shopLabel) {
       const oids = item.order_ids || (item.order_id ? [item.order_id] : []);
       const ts = item.update_time || item.create_time || 0;
       for (const oid of oids) {
+        if (item.arbitration_status && (!amap[oid] || ts > amap[oid].ts)) amap[oid] = { status: item.arbitration_status, ts };
         const prev = map[oid];
         // return_reason = kunci i18n (mis. "ecom_..._reason_damaged_toko"), return_reason_text =
         // teks Inggris terbaca ("Package or product is damaged"). Terjemahan dipatok ke teksnya.
@@ -386,7 +414,8 @@ async function ttReturnMap(ctx, cipher, daysBack, shopLabel) {
     pageToken = r.data?.next_page_token || r.data?.page_token || '';
     more = !!pageToken && list.length > 0;
   }
-  log('info', `Retur TikTok "${shopLabel}": ${Object.keys(map).length} order ada data retur (${daysBack} hari terakhir)`);
+  for (const oid in amap) if (map[oid]) map[oid].arb = amap[oid];
+  log('info', `Retur TikTok "${shopLabel}": ${Object.keys(map).length} order ada data retur, ${Object.keys(amap).length} masuk banding/arbitrase (${daysBack} hari terakhir)`);
   return map;
 }
 
@@ -404,7 +433,7 @@ const COMP_STATUS_PESANAN = 'Dana Cair', COMP_PROGRESS = 'Done';
 const COMP_STATUS_KANDIDAT = ['Pengiriman Gagal', 'Proses Pencairan Dana']; // status manual yg biasanya menunggu kompensasi
 const isLostCand = (statusTerakhir, statusPesanan) => /^Hilang/.test(statusTerakhir || '') || COMP_STATUS_KANDIDAT.includes(statusPesanan || '');
 async function shopeeCompMap(shopId, fromTs) {
-  const map = {}; const now = Math.floor(Date.now() / 1000);
+  const map = {}; const now = Math.floor(Date.now() / 1000); const seen = new Set(); // transaksi tepat di batas 2 jendela jangan terhitung dobel
   for (let w = 0; now - w * 9 * 86400 > fromTs; w++) {
     const to = now - w * 9 * 86400, from = Math.max(fromTs, to - 9 * 86400);
     for (let page = 0; page < 40; page++) {
@@ -413,6 +442,7 @@ async function shopeeCompMap(shopId, fromTs) {
       const l = r.response?.transaction_list || [];
       for (const x of l) {
         if (x.status && x.status !== 'COMPLETED') continue;
+        const tid = String(x.transaction_id || `${x.order_sn}|${x.create_time}|${x.amount}`); if (seen.has(tid)) continue; seen.add(tid);
         const e = map[x.order_sn] || (map[x.order_sn] = { jumlah: 0, ts: 0 });
         e.jumlah += Number(x.amount) || 0; e.ts = Math.max(e.ts, x.create_time || 0);
       }
@@ -609,7 +639,7 @@ async function main() {
   const targets = []; let skipped = 0, skippedFinal = 0;
   const skipFinalDays = Math.max(0, CFG.skipFinalDays || 0);
   // Record final & lama (di-skip dari update Status Terakhir demi hemat API) TAPI kolom
-  // returReasonCol/disputeStatusCol-nya (kalau dikonfigur) tetap dicek belakangan, SESUDAH
+  // returReasonCol & kolom banding-nya (kalau dikonfigur) tetap dicek belakangan, SESUDAH
   // shReturnCache Shopee ke-isi -- 0 API tambahan krn shReturnCache sudah nyakup 90 hari
   // penuh terlepas dari target mana yg diproses. Diminta user (19 Sep 2026): retur LAMA yg
   // justru paling butuh backfill alasan/status banding, jangan ikut ke-skip total.
@@ -639,17 +669,16 @@ async function main() {
       // kompensasi justru datang belakangan (hari-minggu sesudah dinyatakan hilang).
       const perluKomp = !!cols && isLostCand(prevStatus, stPesanan)
         && (stPesanan !== COMP_STATUS_PESANAN || progress !== COMP_PROGRESS || !tglSelesai || (cols.has('Jumlah Dana Cair') && (jumlahCair == null || jumlahCair === '')));
+      // kolom banding (hanya sumber "banding": true). Status Banding sudah Disetujui/Ditolak -> bagian banding dilewati.
+      const banding = src.banding ? { status: larkText(rec.fields['Status Banding'] || ''), aju: larkText(rec.fields['Status Aju'] || ''), tglAjuin: rec.fields['Tgl Ajuin'] || 0, tglClose: rec.fields['Tgl Close'] || 0 } : null;
+      const perluBanding = !!banding && !BANDING_FINAL.has(banding.status);
       if (skipFinalDays > 0 && prevStatus && isFinalCategory(categorize(prevStatus)) && prevTs && !perluKomp) {
         const ageDays = (Date.now() - prevTs) / 86400000;
         if (ageDays >= skipFinalDays) {
           skippedFinal++;
-          if (src.returReasonCol || src.disputeStatusCol) {
-            const returReasonCol = src.returReasonCol || '';
-            backfillCandidates.push({
-              app: src.app, table: src.table, recordId: rec.record_id, orderSn, toko: getToko(rec.fields),
-              returReasonCol, existingReason: returReasonCol ? larkText(rec.fields[returReasonCol]) : '',
-              disputeStatusCol: src.disputeStatusCol || '',
-            });
+          const returReasonCol = src.returReasonCol || '', existingReason = returReasonCol ? larkText(rec.fields[returReasonCol]) : '';
+          if ((returReasonCol && !existingReason) || perluBanding) {
+            backfillCandidates.push({ app: src.app, table: src.table, recordId: rec.record_id, orderSn, toko: getToko(rec.fields), returReasonCol, existingReason, banding: perluBanding ? banding : null, cols });
           }
           continue;
         }
@@ -657,8 +686,7 @@ async function main() {
       const toko = getToko(rec.fields);
       const returReasonCol = src.returReasonCol || '';
       const existingReason = returReasonCol ? larkText(rec.fields[returReasonCol]) : '';
-      const disputeStatusCol = src.disputeStatusCol || '';
-      const base = { app: src.app, table: src.table, srcName: (src.label || src.table), recordId: rec.record_id, orderSn, toko, prevStatus, returReasonCol, existingReason, disputeStatusCol, cols, stPesanan, progress, tglSelesai, jumlahCair };
+      const base = { app: src.app, table: src.table, srcName: (src.label || src.table), recordId: rec.record_id, orderSn, toko, prevStatus, returReasonCol, existingReason, banding: perluBanding ? banding : null, cols, stPesanan, progress, tglSelesai, jumlahCair };
       if (!toko || toko.trim() === '') {
         targets.push(Object.assign(base, { platform: 'unknown' }));
       } else {
@@ -678,20 +706,6 @@ async function main() {
     try { shReturnCache[sid] = await shopeeReturnMap(sid, daysBack); }
     catch (e) { log('err', `Setup Shopee ${sid}: ${e.message}`); }
   }));
-
-  // Backfill Ket Komplainan/Keterangan MP utk record final&lama yg tadi di-skip dari update
-  // Status Terakhir -- pakai shReturnCache yg SUDAH ke-isi barusan, 0 API tambahan.
-  for (const c of backfillCandidates) {
-    const shopId = SHOPEE_NORM[canonKey(c.toko)];
-    if (!shopId) continue; // bukan toko Shopee yg dikenali -- tidak ada data retur utk dicek
-    const info = (shReturnCache[shopId] || {})[c.orderSn];
-    if (!info) continue;
-    const fields = {};
-    if (c.returReasonCol && !c.existingReason && (info.reason || info.text_reason)) fields[c.returReasonCol] = formatReturnReason(info.reason, info.text_reason);
-    if (c.disputeStatusCol) { const dLabel = formatDisputeStatus(info.status, info.update_time); if (dLabel) fields[c.disputeStatusCol] = dLabel; }
-    if (Object.keys(fields).length) backfillUpdates.push({ app: c.app, table: c.table, record_id: c.recordId, fields });
-  }
-  if (backfillUpdates.length) log('info', `🗄 Backfill: ${backfillUpdates.length} record lama (final & >${skipFinalDays} hari) dapat Ket Komplainan/Keterangan MP tanpa update Status Terakhir`);
 
   const ttKeys = Object.keys(ttByName);
   await Promise.all(ttKeys.map(async key => {
@@ -715,6 +729,23 @@ async function main() {
     } catch (e) { log('err', `Setup TikTok "${entry.name}": ${e.message}`); }
   }));
   log('ok', `Setup selesai: ${shopIds.length} toko Shopee, ${ttKeys.length} toko TikTok`);
+
+  // Backfill Ket Komplainan + kolom banding utk record final&lama yg tadi di-skip dari update Status
+  // Terakhir -- pakai cache retur Shopee & TikTok yg SUDAH ke-isi, 0 API tambahan.
+  for (const c of backfillCandidates) {
+    const ck = canonKey(c.toko), shopId = SHOPEE_NORM[ck];
+    const sInfo = shopId ? (shReturnCache[shopId] || {})[c.orderSn] : null;
+    const tInfo = !shopId ? (ttReturnCache[ck] || {})[c.orderSn] : null;
+    if (!sInfo && !tInfo) continue;
+    const fields = {};
+    if (c.returReasonCol && !c.existingReason) {
+      const alasan = sInfo ? ((sInfo.reason || sInfo.text_reason) ? formatReturnReason(sInfo.reason, sInfo.text_reason) : '') : formatTtReason(tInfo.reasonText);
+      if (alasan) fields[c.returReasonCol] = alasan;
+    }
+    Object.assign(fields, bandingFields(c, bandingOf(sInfo, tInfo)));
+    if (Object.keys(fields).length) backfillUpdates.push({ app: c.app, table: c.table, record_id: c.recordId, fields });
+  }
+  if (backfillUpdates.length) log('info', `🗄 Backfill: ${backfillUpdates.length} record lama (final & >${skipFinalDays} hari) dapat Ket Komplainan/banding tanpa update Status Terakhir`);
 
   // dedup No. Pesanan lintas tabel
   const orderGroups = {};
@@ -807,14 +838,8 @@ async function main() {
               : ttReturnInfo ? formatTtReason(ttReturnInfo.reasonText) : '';
             if (alasan) fields[row.returReasonCol] = alasan;
           }
-          // Keterangan MP (status banding) -- BEDA dari Ket Komplainan: ini status bergerak
-          // (Sedang Banding -> Disetujui/Ditolak), jadi SELALU ditimpa dgn nilai terbaru, tidak
-          // skip walau sudah terisi (kalau tetap SELLER_DISPUTE/JUDGING & tanggal sama, isinya
-          // ya sama saja -- bukan masalah).
-          if (row.disputeStatusCol && shopReturnInfo) {
-            const dLabel = formatDisputeStatus(shopReturnInfo.status, shopReturnInfo.update_time);
-            if (dLabel) fields[row.disputeStatusCol] = dLabel;
-          }
+          // Status Banding / Status Aju / Tgl Ajuin / Tgl Close (lihat komentar BANDING di atas)
+          Object.assign(fields, bandingFields(row, bandingOf(shopReturnInfo, ttReturnInfo)));
           updates.push({ app: row.app, table: row.table, record_id: row.recordId, fields });
           if (row.cols && isLostCand(finalDesc, row.stPesanan) && !kompLengkap(row)) compRows.push({ row, platform: t.platform, shopId: t.shopId, ttKey: t.platform === 'tiktok' ? canonKey(t.toko) : '', ts: ts || 0 });
           const cat = categorize(finalDesc); catCounts[cat] = (catCounts[cat] || 0) + 1;
@@ -857,8 +882,10 @@ async function main() {
     log('ok', `💰 Kompensasi cair terdeteksi: ${hasil.size} baris (${compUpdates.length} perlu diisi), ${compBelum} belum ada kompensasi`);
   }
 
-  // batch update ke Lark (gabung update biasa + backfill Ket Komplainan/Keterangan MP)
+  // batch update ke Lark (gabung update biasa + backfill Ket Komplainan/banding)
   const allUpdates = updates.concat(backfillUpdates);
+  { const b = {}; for (const u of allUpdates) if (u.fields['Status Banding'] || u.fields['Tgl Close'] || u.fields['Tgl Ajuin']) { const k = `${u.fields['Status Banding'] || '(status sama)'} / Aju ${u.fields['Status Aju'] || '-'}`; b[k] = (b[k] || 0) + 1; }
+    if (Object.keys(b).length) log('info', `⚖️ Isian banding: ${Object.entries(b).map(([k, v]) => `${v}× ${k}`).join(' · ')}`); }
   if (env.DRY_RUN) {
     log('warn', `🧪 DRY_RUN: ${allUpdates.length} record TIDAK ditulis ke Lark. Contoh 3 yg akan ditulis:`);
     for (const u of allUpdates.slice(0, 3)) log('info', `   ${u.record_id}: ${JSON.stringify(u.fields)}`);
@@ -919,6 +946,7 @@ async function main() {
     log('info', `🏷 Alasan retur TikTok ditemukan (${seenTtReasons.size}):`);
     for (const [teks, hasil] of seenTtReasons) log('info', `   "${teks}" → ditulis: "${hasil}"${teks === hasil ? '   ⚠ belum diterjemahkan' : ''}`);
   }
+  if (seenBandingUnknown.size) log('warn', `⚠ Status banding BARU yg belum dipetakan (tidak ditulis): ${[...seenBandingUnknown].join(', ')} — tambahkan ke SHOPEE_BANDING/TT_BANDING`);
 
   // GitHub Actions step summary (markdown, muncul di tab Actions)
   const ghStep = env.GITHUB_STEP_SUMMARY;
