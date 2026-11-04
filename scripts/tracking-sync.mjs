@@ -318,27 +318,13 @@ function bandingFields(row, b) {
 }
 
 // ═══ TIKTOK ═══
-function ttSign(path, query, bodyStr, appSecret) {
-  const keys = Object.keys(query).filter(k => !['sign', 'access_token', 'x-tts-access-token'].includes(k)).sort();
-  let s = ''; for (const k of keys) { if (typeof query[k] !== 'object') s += `${k}${query[k]}`; }
-  s = path + s; if (bodyStr) s += bodyStr; s = appSecret + s + appSecret; return hmacHex(appSecret, s);
-}
+// App Secret & token dipegang Worker (secret Cloudflare), skrip ini cuma mengirim toko + path.
 async function ttCall(ctx, opts) {
   const method = opts.method || 'GET'; const path = `/${opts.path}`.replace('//', '/');
-  const query = Object.assign({ app_key: ctx.appKey, timestamp: Math.floor(Date.now() / 1000) }, opts.query || {});
-  if (opts.shopCipher) query.shop_cipher = opts.shopCipher;
-  const bodyStr = (method !== 'GET' && opts.body) ? JSON.stringify(opts.body) : '';
-  query.sign = ttSign(path, query, bodyStr, ctx.appSecret);
-  const qs = Object.entries(query).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-  const r = await fetchJsonRetry(`${TT_HOST}${path}?${qs}`, { method, headers: { 'content-type': 'application/json', 'x-tts-access-token': ctx.accessToken }, body: bodyStr || undefined }, r => isRateLimitMsg(r.message), `TT ${method} ${path}`);
+  const body = { action: 'gh_tt_proxy', secret: GITHUB_SYNC_SECRET, shop_id: ctx.shopId, method, path, query: opts.query || {}, body: opts.body, cipher: opts.shopCipher };
+  const r = await fetchJsonRetry(WORKER_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, r => isRateLimitMsg(r.message), `TT ${method} ${path}`);
   if (r.code !== 0) log('warn', `TT ${method} ${path} → ${r.code} ${r.message || ''}`);
   return r;
-}
-async function ttRefresh(appKey, appSecret, rt) {
-  const u = `${TT_AUTH}/api/v2/token/refresh?app_key=${encodeURIComponent(appKey)}&app_secret=${encodeURIComponent(appSecret)}&refresh_token=${encodeURIComponent(rt)}&grant_type=refresh_token`;
-  const r = await fetch(u).then(x => x.json());
-  if (r.code !== 0 || !r.data?.access_token) throw new Error(`refresh TT gagal: ${r.code} ${r.message || ''}`);
-  return { access_token: r.data.access_token, refresh_token: r.data.refresh_token || rt, expire: r.data.access_token_expire_in || 0 };
 }
 function ttTs(e) { return e.update_time_millis ? Math.floor(e.update_time_millis / 1000) : (e.update_time || e.ctime || e.time || 0); }
 async function ttTracking(ctx, cipher, orderId) {
@@ -730,17 +716,17 @@ async function main() {
     for (const r of rows) {
       const f = r.fields;
       const nm = larkText(f[CFG.ttNameCol]);
-      const appKey = larkText(f['App Key']), appSecret = larkText(f['App Secret']), rt = larkText(f['Refresh Token']), cipher = larkText(f['Shop Cipher']), shopId = larkText(f['Shop ID']);
+      const appKey = larkText(f['App Key']), rt = larkText(f['Refresh Token']), cipher = larkText(f['Shop Cipher']), shopId = larkText(f['Shop ID']);
       // Baris Shopee TIDAK PUNYA App Key/Secret/Refresh Token (itu kolom khusus TikTok) --
       // makanya dulu baris begini dilewati BEGITU SAJA (`continue` di bawah), Shop ID-nya tidak
       // pernah diambil sama sekali. Diambil di SINI, SEBELUM continue, spt tokonya SM Zeodda
       // Surabaya di screenshot user (Shop ID + Nama Toko Rumus terisi, App Key dkk kosong).
       // Syarat "!appKey && !appSecret" sengaja dipasang -- tanpa itu, baris TikTok yg App
       // Key-nya kebetulan juga py Shop ID numerik akan ikut kepakai sbg id toko SHOPEE.
-      if (nm && /^\d+$/.test(shopId) && !appKey && !appSecret) shopeeFromLark[nm] = parseInt(shopId);
-      if (!appKey || !appSecret || !rt) continue;
+      if (nm && /^\d+$/.test(shopId) && !appKey) shopeeFromLark[nm] = parseInt(shopId);
+      if (!appKey || !rt) continue;
       const key = nm ? canonKey(nm) : canonKey(shopId);
-      if (key) ttByName[key] = { appKey, appSecret, rt, cipher, recordId: r.record_id, name: nm || shopId };
+      if (key) ttByName[key] = { shopId, cipher, recordId: r.record_id, name: nm || shopId };
     }
     log('info', `${Object.keys(ttByName).length} toko TikTok punya kredensial lengkap, ${Object.keys(shopeeFromLark).length} toko Shopee ketemu di tabel ini`);
   }
@@ -871,8 +857,7 @@ async function main() {
   await Promise.all(ttKeys.map(async key => {
     const entry = ttByName[key]; if (!entry) return;
     try {
-      const tk = await ttRefresh(entry.appKey, entry.appSecret, entry.rt);
-      const ctx = { appKey: entry.appKey, appSecret: entry.appSecret, accessToken: tk.access_token };
+      const ctx = { shopId: entry.shopId };
       let cipher = entry.cipher;
       if (!cipher) {
         const sh = await ttCall(ctx, { method: 'GET', path: `authorization/${VER}/shops` });
@@ -880,8 +865,7 @@ async function main() {
         const arr = sh.data?.shops || []; if (arr[0]) cipher = arr[0].cipher;
       }
       ttCtx[key] = { ctx, cipher };
-      const upF = { 'Access Token': tk.access_token, 'Refresh Token': tk.refresh_token }; if (cipher) upF['Shop Cipher'] = cipher;
-      larkFetch('PUT', `/open-apis/bitable/v1/apps/${CFG.ttTokApp}/tables/${CFG.ttTokTable}/records/${entry.recordId}`, { fields: upF }).catch(() => {});
+      if (cipher && cipher !== entry.cipher) larkFetch('PUT', `/open-apis/bitable/v1/apps/${CFG.ttTokApp}/tables/${CFG.ttTokTable}/records/${entry.recordId}`, { fields: { 'Shop Cipher': cipher } }).catch(() => {});
       if (cipher) {
         try { ttReturnCache[key] = await ttReturnMap(ctx, cipher, daysBack, entry.name); }
         catch (e) { log('warn', `Retur TikTok "${entry.name}": ${e.message}`); }
