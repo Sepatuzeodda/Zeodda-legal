@@ -289,6 +289,8 @@ const TT_BANDING = { IN_PROGRESS: 'On Proses', SUPPORT_SELLER: 'Disetujui', SUPP
 const BANDING_FINAL = new Set(['Disetujui', 'Ditolak']);
 const BANDING_BOLEH_TIMPA = new Set(['', 'On Proses', 'Belum Banding']); // isian manual lain (Dibiayakan, Tidak Banding, dst) tak disentuh
 const seenBandingUnknown = new Set();
+// "Tidak Banding + Dana Cair" bukan keputusan akhir: kalau di marketplace ternyata ada banding, ikuti marketplace (5 Nov 2026).
+const bandingBisaDitimpa = (c) => BANDING_BOLEH_TIMPA.has(c.status) || (c.status === 'Tidak Banding' && c.ketAdm === 'Dana Cair');
 function bandingOf(shopRet, ttRet) {
   if (shopRet?.dispute) {
     const hasil = SHOPEE_BANDING[shopRet.dispute.status];
@@ -304,9 +306,10 @@ function bandingOf(shopRet, ttRet) {
 }
 function bandingFields(row, b) {
   const cur = row.banding;
-  if (!b || !cur || !row.cols || !BANDING_BOLEH_TIMPA.has(cur.status)) return {};
+  if (!b || !cur || !row.cols || !bandingBisaDitimpa(cur)) return {};
   const f = {}, has = (c) => row.cols.has(c);
   if (has('Status Banding') && cur.status !== b.hasil) f['Status Banding'] = b.hasil;
+  if (has('Ket Adm') && cur.status === 'Tidak Banding') f['Ket Adm'] = 'Komplainan';
   if (b.hasil === 'On Proses') {
     if (has('Status Aju') && cur.aju !== 'On Proses') f['Status Aju'] = 'On Proses';
     if (has('Tgl Ajuin') && !cur.tglAjuin && b.ts) f['Tgl Ajuin'] = noonWib(b.ts);
@@ -493,7 +496,7 @@ function compFields(row, hit) {
 //  - dana pesanan/kompensasi cair            -> Status Banding "Tidak Banding", Ket Adm "Dana Cair", Penyelesaian "Dana … sudah cair …"
 //  - sempat cair lalu DITARIK utk refund     -> Status Barang Sesuai: tak diisi; Tidak Sesuai: ≤30 hari "Belum Banding — perlu banding",
 //    (total bersih <= 0)                        >30 hari "Tidak Banding — lewat masa banding"; Status Barang kosong: tunggu ops.
-// Isian staf tidak ditimpa. HARIAN & INKREMENTAL: baris final dilewati sebelum panggil API (lihat danaKandidat).
+// Keputusan staf lain tidak ditimpa, tapi "Tidak Banding + Dana Cair" (teks apa pun) tetap dicek. HARIAN & INKREMENTAL: baris final dilewati sebelum panggil API (lihat danaKandidat).
 // UBAH ATURAN DI SINI = UBAH JUGA cek_dana_cair.js (dan sebaliknya).
 const DANA_MASA_BANDING_HARI = 30;   // sesudah ditarik
 const DANA_CAIR_CEK_ULANG_HARI = 60; // isian "Dana pesanan sudah cair" dicek ulang (bisa ditarik) sampai 60 hari sesudah cair
@@ -506,10 +509,12 @@ const danaReturAktif = (ret, cairTs) => !!ret && (DANA_RETUR_JALAN.has(ret.statu
 const danaTgl = (ts) => { const d = new Date((ts + 7 * 3600) * 1000); return `${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${d.getUTCFullYear()}`; };
 const danaRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
 const danaIsianTool = (r) => r.sb === 'Tidak Banding' && r.ketAdm === 'Dana Cair' && /^Dana pesanan sudah cair/.test(r.peny || '');
+const danaTandaCair = (r) => r.sb === 'Tidak Banding' && r.ketAdm === 'Dana Cair'; // teks apa pun: tanda ini tidak boleh membuat pesanan berhenti dicek (5 Nov 2026)
 // Masih mungkin diisi/dikoreksi? (sama dgn filter tool + batas umur isian Dana Cair & yg sudah "lewat masa banding")
 function danaKandidat(r, nowS) {
+  if (DANA_RETUR_JALAN.has(r.retur?.status)) return true;
   if (r.sb === 'Tidak Banding' && /lewat masa banding$/.test(r.peny || '')) return false;
-  if (danaIsianTool(r)) {
+  if (danaTandaCair(r)) {
     const m = /(\d{2})-(\d{2})-(\d{4})/.exec(r.peny);
     return !m || (nowS * 1000 - Date.UTC(+m[3], +m[2] - 1, +m[1])) / 86400000 <= DANA_CAIR_CEK_ULANG_HARI;
   }
@@ -519,40 +524,50 @@ function danaKandidat(r, nowS) {
 function danaRencana(r, d, nowS) {
   const f = {}, has = (c) => r.cols.has(c);
   const berjalan = / — retur masih berjalan$/.test(r.peny || ''); // teks sementara buatan skrip: diganti begitu retur selesai
+  // Teks buatan sistem diganti; catatan staf disimpan di depan ("catatan | teks sistem")
+  const isiPeny = (t) => {
+    const [awal, ...sisa] = (r.peny || '').split(' | ');
+    const staf = sisa.length ? awal : (danaIsianTool(r) || / — (perlu banding|retur masih berjalan)$/.test(awal)) ? '' : awal;
+    return staf ? `${staf} | ${t}` : t;
+  };
   if (d.returAktif && d.cair?.jenis === 'pesanan' && !d.ditarik) {
-    const lama = danaIsianTool(r);
+    const lama = danaTandaCair(r);
     if (r.barang === 'Sesuai') return { kat: 'cair, retur berjalan — barang sesuai', f };
     if (!lama && !['', 'Belum Banding'].includes(r.sb)) return { kat: 'cair, retur berjalan — sudah ditangani staf', f };
     if (has('Status Banding') && (lama || r.sb === '')) f['Status Banding'] = 'Belum Banding';
     if (has('Ket Adm') && lama) f['Ket Adm'] = 'Komplainan';
-    if (has('Penyelesaian Komplaian') && (lama || !r.peny)) f['Penyelesaian Komplaian'] = `Dana sempat cair ${danaTgl(d.cair.ts)} (${danaRp(d.cair.amount)}), customer ajukan retur — retur masih berjalan`;
+    if (has('Penyelesaian Komplaian') && (lama || !r.peny)) f['Penyelesaian Komplaian'] = isiPeny(`Dana sempat cair ${danaTgl(d.cair.ts)} (${danaRp(d.cair.amount)}), customer ajukan retur — retur masih berjalan`);
     return { kat: 'cair, retur berjalan', f };
   }
   if (d.ditarik && d.cair?.jenis !== 'kompensasi') {
     const x = d.ditarik, teks = `${x.cair ? `Dana sempat cair ${danaTgl(x.cair.pay || x.cair.ts)} (${danaRp(x.cair.amount)}), lalu ` : 'Dana '}ditarik kembali ${danaTgl(x.ts)} (-${danaRp(x.amount)}) utk refund pembeli`;
-    const lama = danaIsianTool(r), perluTeks = / — perlu banding$/.test(r.peny || ''); // teks "perlu banding" buatan tool boleh diganti
+    const lama = danaTandaCair(r), perluTeks = / — perlu banding$/.test(r.peny || ''); // teks "perlu banding" buatan tool boleh diganti
     const lewat = (nowS - x.ts) / 86400 > DANA_MASA_BANDING_HARI;
-    if (r.barang === 'Sesuai') return { kat: 'ditarik — barang sesuai', f };
+    if (r.barang === 'Sesuai') { // retur memang diterima: tetap Tidak Banding, tapi tanda Dana Cair dicabut krn dananya sudah kembali ke pembeli
+      if (lama && has('Ket Adm')) f['Ket Adm'] = 'Komplainan';
+      if (lama && has('Penyelesaian Komplaian')) f['Penyelesaian Komplaian'] = isiPeny(teks);
+      return { kat: 'ditarik — barang sesuai', f };
+    }
     if (!lama && !['', 'Belum Banding'].includes(r.sb)) return { kat: 'ditarik — sudah ditangani staf', f };
     if (!r.barang && !lama && !(lewat && perluTeks)) {
-      if (berjalan && has('Penyelesaian Komplaian')) f['Penyelesaian Komplaian'] = teks;
+      if (berjalan && has('Penyelesaian Komplaian')) f['Penyelesaian Komplaian'] = isiPeny(teks);
       return { kat: 'ditarik — Status Barang belum diisi ops', f };
     }
     // isian Dana Cair lama + barang kosong: > 30 hari cuma luruskan teks; <= 30 hari -> PERLU BANDING (Tidak Banding/Dana Cair dicabut, user 15 Okt)
     if (!r.barang && lama && lewat) {
       if (has('Ket Adm')) f['Ket Adm'] = 'Komplainan';
-      if (has('Penyelesaian Komplaian')) f['Penyelesaian Komplaian'] = teks;
+      if (has('Penyelesaian Komplaian')) f['Penyelesaian Komplaian'] = isiPeny(teks);
       return { kat: 'ditarik — koreksi isian Dana Cair', f };
     }
     if (lewat) {
       if (has('Status Banding') && ['', 'Belum Banding'].includes(r.sb)) f['Status Banding'] = 'Tidak Banding';
       if (has('Ket Adm') && lama) f['Ket Adm'] = 'Komplainan';
-      if (has('Penyelesaian Komplaian') && (lama || !r.peny || perluTeks || berjalan)) f['Penyelesaian Komplaian'] = teks + ' — lewat masa banding';
+      if (has('Penyelesaian Komplaian') && (lama || !r.peny || perluTeks || berjalan)) f['Penyelesaian Komplaian'] = isiPeny(teks + ' — lewat masa banding');
       return { kat: 'ditarik — lewat masa banding', f };
     }
     if (has('Status Banding') && (lama || r.sb === '')) f['Status Banding'] = 'Belum Banding';
     if (has('Ket Adm') && lama) f['Ket Adm'] = 'Komplainan';
-    if (has('Penyelesaian Komplaian') && (lama || !r.peny || berjalan)) f['Penyelesaian Komplaian'] = teks + ' — perlu banding';
+    if (has('Penyelesaian Komplaian') && (lama || !r.peny || berjalan)) f['Penyelesaian Komplaian'] = isiPeny(teks + ' — perlu banding');
     return { kat: 'ditarik — PERLU BANDING', f };
   }
   if (d.cair) {
@@ -560,9 +575,9 @@ function danaRencana(r, d, nowS) {
     if (danaIsianTool(r)) return { kat, f }; // sudah benar
     if (has('Status Banding') && ['', 'Belum Banding'].includes(r.sb)) f['Status Banding'] = 'Tidak Banding';
     if (has('Ket Adm') && DANA_KETADM_BOLEH.has(r.ketAdm)) f['Ket Adm'] = 'Dana Cair';
-    if (has('Penyelesaian Komplaian') && (!r.peny || berjalan)) f['Penyelesaian Komplaian'] = d.cair.jenis === 'kompensasi'
+    if (has('Penyelesaian Komplaian') && (!r.peny || berjalan)) f['Penyelesaian Komplaian'] = isiPeny(d.cair.jenis === 'kompensasi'
       ? `Dana kompensasi (${d.cair.alasan}) sudah cair di tanggal ${danaTgl(d.cair.ts)} (${danaRp(d.cair.amount)})`
-      : `Dana pesanan sudah cair di tanggal ${danaTgl(d.cair.ts)} (${danaRp(d.cair.amount)})`;
+      : `Dana pesanan sudah cair di tanggal ${danaTgl(d.cair.ts)} (${danaRp(d.cair.amount)})`);
     return { kat, f };
   }
   return { kat: 'belum cair', f };
@@ -576,11 +591,13 @@ async function danaShopee(sid, sns, nowS) {
   }
   const want = new Set(Object.keys(od)), wins = new Set();
   // 7 jendela x 9 hari (±60 hari): kompensasi pesanan hilang bisa cair >27 hari sesudah update_time (30 Okt 2026: 260909J4FQFR1A, 2609058EE06KXW terlewat)
-  for (const o of Object.values(od)) { const w = Math.floor(((o.update_time || nowS) - 3 * 86400) / (9 * 86400)); for (let k = 0; k < 7; k++) wins.add(w + k); }
+  // dari pesanan dibuat: retur sesudah cair menggeser update_time jauh melewati tanggal cairnya
+  for (const o of Object.values(od)) { const w = Math.floor(((o.update_time || nowS) - 3 * 86400) / (9 * 86400)); for (let k = Math.floor((o.create_time || nowS) / (9 * 86400)); k < w + 7; k++) wins.add(k); }
   const wallet = {};
   for (const w of [...wins].sort((a, b) => a - b)) {
     const from = w * 9 * 86400, to = Math.min(nowS, from + 9 * 86400); if (from > nowS) continue;
-    for (const type of ['ESCROW_VERIFIED_ADD', 'FULFILMENT_COMPENSATE_ADD', 'ESCROW_VERIFIED_MINUS']) for (let page = 0; page < 150; page++) {
+    // ADJUSTMENT_FOR_RR_AFTER_ESCROW_VERIFIED = dana DITARIK krn retur sesudah dana dilepas; RETURN_COMPENSATION_SERVICE_ADD = Kompensasi Jasa Kirim (terverifikasi 5 Nov 2026: 2609263K83APF7, 260909HTJPB35A)
+    for (const type of ['ESCROW_VERIFIED_ADD', 'FULFILMENT_COMPENSATE_ADD', 'ESCROW_VERIFIED_MINUS', 'ADJUSTMENT_FOR_RR_AFTER_ESCROW_VERIFIED', 'RETURN_COMPENSATION_SERVICE_ADD']) for (let page = 0; page < 150; page++) {
       const r = await shopeeGet('/api/v2/payment/get_wallet_transaction_list', sid, { page_no: page, page_size: 100, create_time_from: from, create_time_to: to, transaction_type: type });
       if (r.error && r.error !== '') { log('warn', `Dana cair Shopee ${sid}: ${r.error} ${r.message || ''}`); break; }
       for (const x of r.response?.transaction_list || []) if (want.has(x.order_sn) && (x.status || 'COMPLETED') === 'COMPLETED' && Number(x.amount)) (wallet[x.order_sn] || (wallet[x.order_sn] = [])).push({ type: x.transaction_type, amount: Math.abs(Number(x.amount)), ts: x.create_time });
@@ -589,11 +606,11 @@ async function danaShopee(sid, sns, nowS) {
   }
   for (const sn of want) {
     const w = wallet[sn] || [], urut = (t) => w.filter(x => x.type === t).sort((a, b) => a.ts - b.ts);
-    const komp = urut('FULFILMENT_COMPENSATE_ADD')[0], add = urut('ESCROW_VERIFIED_ADD'), esc = add[0], minus = urut('ESCROW_VERIFIED_MINUS');
+    const komp = urut('FULFILMENT_COMPENSATE_ADD')[0], add = urut('ESCROW_VERIFIED_ADD'), esc = add[0], minus = [...urut('ESCROW_VERIFIED_MINUS'), ...urut('ADJUSTMENT_FOR_RR_AFTER_ESCROW_VERIFIED')].sort((a, b) => a.ts - b.ts), kompRetur = urut('RETURN_COMPENSATION_SERVICE_ADD')[0];
     const tarik = minus.reduce((a, x) => a + x.amount, 0), masuk = add.reduce((a, x) => a + x.amount, 0);
     data[sn] = {
       ditarik: esc && minus.length && tarik >= masuk ? { ts: minus[minus.length - 1].ts, amount: tarik, cair: esc } : null,
-      cair: komp ? { jenis: 'kompensasi', alasan: 'pesanan hilang', ts: komp.ts, amount: komp.amount } : esc ? { jenis: 'pesanan', ts: esc.ts, amount: esc.amount } : null,
+      cair: komp ? { jenis: 'kompensasi', alasan: 'pesanan hilang', ts: komp.ts, amount: komp.amount } : kompRetur ? { jenis: 'kompensasi', alasan: 'kompensasi jasa kirim', ts: kompRetur.ts, amount: kompRetur.amount } : esc ? { jenis: 'pesanan', ts: esc.ts, amount: esc.amount } : null,
     };
   }
   return data;
@@ -808,6 +825,25 @@ async function main() {
     try { shReturnCache[sid] = await shopeeReturnMap(sid, daysBack); }
     catch (e) { log('err', `Setup Shopee ${sid}: ${e.message}`); }
   }));
+  const ttKeys = Object.keys(ttByName);
+  await Promise.all(ttKeys.map(async key => {
+    const entry = ttByName[key]; if (!entry) return;
+    try {
+      const ctx = { shopId: entry.shopId };
+      let cipher = entry.cipher;
+      if (!cipher) {
+        const sh = await ttCall(ctx, { method: 'GET', path: `authorization/${VER}/shops` });
+        if (sh.code !== 0) log('err', `⚠ Toko "${entry.name}": token/App Key tidak cocok (${sh.code} ${sh.message || ''}) — perlu otorisasi ulang`);
+        const arr = sh.data?.shops || []; if (arr[0]) cipher = arr[0].cipher;
+      }
+      ttCtx[key] = { ctx, cipher };
+      if (cipher && cipher !== entry.cipher) larkFetch('PUT', `/open-apis/bitable/v1/apps/${CFG.ttTokApp}/tables/${CFG.ttTokTable}/records/${entry.recordId}`, { fields: { 'Shop Cipher': cipher } }).catch(() => {});
+      if (cipher) {
+        try { ttReturnCache[key] = await ttReturnMap(ctx, cipher, daysBack, entry.name); }
+        catch (e) { log('warn', `Retur TikTok "${entry.name}": ${e.message}`); }
+      }
+    } catch (e) { log('err', `Setup TikTok "${entry.name}": ${e.message}`); }
+  }));
   for (const src of sources) {
     let recs;
     try { recs = await larkAllRecords(src.app, src.table, src.view); }
@@ -834,17 +870,19 @@ async function main() {
       const perluKomp = !!cols && isLostCand(prevStatus, stPesanan)
         && (stPesanan !== COMP_STATUS_PESANAN || progress !== COMP_PROGRESS || !tglSelesai || (cols.has('Jumlah Dana Cair') && (jumlahCair == null || jumlahCair === '')));
       // kolom banding (hanya sumber "banding": true). Status Banding sudah Disetujui/Ditolak -> bagian banding dilewati.
-      const banding = src.banding ? { status: larkText(rec.fields['Status Banding'] || ''), aju: larkText(rec.fields['Status Aju'] || ''), tglAjuin: rec.fields['Tgl Ajuin'] || 0, tglClose: rec.fields['Tgl Close'] || 0 } : null;
+      const banding = src.banding ? { status: larkText(rec.fields['Status Banding'] || ''), ketAdm: larkText(rec.fields['Ket Adm'] || ''), aju: larkText(rec.fields['Status Aju'] || ''), tglAjuin: rec.fields['Tgl Ajuin'] || 0, tglClose: rec.fields['Tgl Close'] || 0 } : null;
       const perluBanding = !!banding && !BANDING_FINAL.has(banding.status);
+      const ckBaris = canonKey(getToko(rec.fields)), sidBaris = SHOPEE_NORM[ckBaris], returBaris = (sidBaris ? (shReturnCache[sidBaris] || {}) : (ttReturnCache[ckBaris] || {}))[orderSn] || null;
       if (src.banding && cols) { // kandidat cek dana cair/ditarik (lihat DANA CAIR)
         const dr = { app: src.app, table: src.table, recordId: rec.record_id, orderSn, toko: getToko(rec.fields), cols, sb: banding.status, ketAdm: larkText(rec.fields['Ket Adm'] || ''),
-          peny: larkText(rec.fields['Penyelesaian Komplaian'] || ''), barang: larkText(rec.fields['Status Barang'] || '') };
+          peny: larkText(rec.fields['Penyelesaian Komplaian'] || ''), barang: larkText(rec.fields['Status Barang'] || ''), retur: returBaris };
         if (danaKandidat(dr, Math.floor(Date.now() / 1000))) danaRows.push(dr);
       }
-      // "Kembali ke Seller" bertanggal SEBELUM retur diajukan = salah baca event kirim ke pembeli -> jangan dibekukan, paket retur tetap harus terpantau
-      const sidSkip = SHOPEE_NORM[canonKey(getToko(rec.fields))], retSkip = sidSkip ? (shReturnCache[sidSkip] || {})[orderSn] : null;
-      const kembaliPalsu = /Kembali ke Seller/.test(prevStatus) && !!retSkip?.create_time && prevTs < retSkip.create_time * 1000;
-      if (skipFinalDays > 0 && prevStatus && isFinalCategory(categorize(prevStatus)) && prevTs && !perluKomp && !kembaliPalsu) {
+      // Retur diajukan SESUDAH status final tertulis ("diterima" / "Kembali ke Seller" palsu) -> jangan dibekukan, paket retur harus terpantau.
+      // Retur batal/ditutup tidak dihitung kecuali statusnya "Kembali ke Seller" palsu (supaya sekali dibetulkan, selesai).
+      const returBaru = !!returBaris?.create_time && prevTs < returBaris.create_time * 1000
+        && (/Kembali ke Seller/.test(prevStatus) || DANA_RETUR_JALAN.has(returBaris.status) || DANA_RETUR_DISETUJUI.has(returBaris.status));
+      if (skipFinalDays > 0 && prevStatus && isFinalCategory(categorize(prevStatus)) && prevTs && !perluKomp && !returBaru) {
         const ageDays = (Date.now() - prevTs) / 86400000;
         if (ageDays >= skipFinalDays) {
           skippedFinal++;
@@ -873,25 +911,6 @@ async function main() {
   log('info', `Target: ${targets.length} order, ${skipped} dilewati${skippedFinal ? `, ${skippedFinal} skip (final & > ${skipFinalDays} hari)` : ''}`);
 
 
-  const ttKeys = Object.keys(ttByName);
-  await Promise.all(ttKeys.map(async key => {
-    const entry = ttByName[key]; if (!entry) return;
-    try {
-      const ctx = { shopId: entry.shopId };
-      let cipher = entry.cipher;
-      if (!cipher) {
-        const sh = await ttCall(ctx, { method: 'GET', path: `authorization/${VER}/shops` });
-        if (sh.code !== 0) log('err', `⚠ Toko "${entry.name}": token/App Key tidak cocok (${sh.code} ${sh.message || ''}) — perlu otorisasi ulang`);
-        const arr = sh.data?.shops || []; if (arr[0]) cipher = arr[0].cipher;
-      }
-      ttCtx[key] = { ctx, cipher };
-      if (cipher && cipher !== entry.cipher) larkFetch('PUT', `/open-apis/bitable/v1/apps/${CFG.ttTokApp}/tables/${CFG.ttTokTable}/records/${entry.recordId}`, { fields: { 'Shop Cipher': cipher } }).catch(() => {});
-      if (cipher) {
-        try { ttReturnCache[key] = await ttReturnMap(ctx, cipher, daysBack, entry.name); }
-        catch (e) { log('warn', `Retur TikTok "${entry.name}": ${e.message}`); }
-      }
-    } catch (e) { log('err', `Setup TikTok "${entry.name}": ${e.message}`); }
-  }));
   log('ok', `Setup selesai: ${shopIds.length} toko Shopee, ${ttKeys.length} toko TikTok`);
 
   // Backfill Ket Komplainan + kolom banding utk record final&lama yg tadi di-skip dari update Status
@@ -1083,7 +1102,6 @@ async function main() {
       const ck = canonKey(r.toko), sid = SHOPEE_NORM[ck];
       const sInfo = sid ? (shReturnCache[sid] || {})[r.orderSn] : null, tInfo = !sid ? (ttReturnCache[ck] || {})[r.orderSn] : null;
       if (bandingOf(sInfo, tInfo)) { adaBanding++; continue; } // diurus bagian BANDING
-      r.retur = sInfo || tInfo;
       if (sid) (byShop[sid] || (byShop[sid] = [])).push(r);
       else if (ttCtx[ck]?.cipher) (byTt[ck] || (byTt[ck] = [])).push(r);
       else tanpaToko++;
