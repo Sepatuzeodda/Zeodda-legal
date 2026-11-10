@@ -2,10 +2,7 @@ name: Tracking Sync (Shopee + TikTok)
 
 on:
   workflow_dispatch: {}
-  schedule:
-    # Sekali sehari sekitar jam 09:30 WIB (02:30 UTC). Menit sengaja BUKAN :00
-    # karena GitHub sendiri bilang jadwal tepat di awal jam paling rawan delay/dropped saat load tinggi.
-    - cron: '30 2 * * *'
+  # 10 Nov 2026: jadwal GitHub DIMATIKAN (sering telat ±1,5 jam). Dijalankan dari cron job luar lewat "Run workflow" / API dispatch.
 
 concurrency:
   group: tracking-sync
