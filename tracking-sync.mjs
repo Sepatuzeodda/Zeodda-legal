@@ -638,6 +638,7 @@ async function danaShopee(sid, sns, nowS) {
     const tarik = minus.reduce((a, x) => a + x.amount, 0), masuk = add.reduce((a, x) => a + x.amount, 0);
     data[sn] = {
       ditarik: esc && minus.length && tarik >= masuk ? { ts: minus[minus.length - 1].ts, amount: tarik, cair: esc } : null,
+      potong: esc ? tarik : 0, // potongan sesudah cair (sebagian/penuh) -- LUNAS tidak menutup baris yg dipotong
       cair: komp ? { jenis: 'kompensasi', alasan: 'pesanan hilang', ts: komp.ts, amount: komp.amount } : kompRetur ? { jenis: 'kompensasi', alasan: 'kompensasi jasa kirim', ts: kompRetur.ts, amount: kompRetur.amount } : esc ? { jenis: 'pesanan', ts: esc.ts, amount: esc.amount } : null,
     };
   }
@@ -671,10 +672,28 @@ async function danaTiktok(e, ids, nowS, label) {
     const bersih = semua.reduce((a, x) => a + x.amount, 0), akhir = neg[neg.length - 1];
     data[id] = {
       ditarik: st && neg.length && bersih <= 0 ? { ts: akhir.pay || akhir.stTime, amount: -neg.reduce((a, x) => a + x.amount, 0), cair: st } : null,
+      potong: st ? -neg.reduce((a, x) => a + x.amount, 0) : 0,
       cair: rb ? { jenis: 'kompensasi', alasan: String(od[id]?.cancel_reason || 'kompensasi logistik').toLowerCase(), ts: rb.ts, amount: rb.jumlah } : st ? { jenis: 'pesanan', ts: st.pay, amount: st.amount } : null,
     };
   }
   return data;
+}
+// ═══ LUNAS: DITERIMA PEMBELI + DANA CAIR (12 Nov 2026, permintaan user) ═══
+// Faktur Belum Lunas (sumber TANPA "banding"): kolom lunas di Lark sering telat -> cek dana cair langsung ke marketplace
+// (danaShopee/danaTiktok yg sama dgn blok DANA CAIR). Status Terakhir "Sudah Diterima Pembeli", Progress belum Done,
+// Jumlah Dana Cair kosong, dana PESANAN cair, tidak ditarik, tanpa retur berjalan -> Status Pesanan "Di Terima Pembeli",
+// Progress "Done", Tanggal Selesai = tgl cair (kalau kosong), Jumlah Dana Cair = nominal cair. Status Pesanan isian staf
+// lain (Komplain, Klaim, Pengembalian, ...) tidak ditimpa.
+const LUNAS_STATUS = 'Di Terima Pembeli', LUNAS_BOLEH_TIMPA = new Set(['', 'Proses Pengiriman', 'Proses Pencairan Dana', LUNAS_STATUS]);
+const lunasKandidat = (prevStatus, progress, jumlahCair) => prevStatus === 'Sudah Diterima Pembeli' && progress !== 'Done' && (jumlahCair == null || jumlahCair === '');
+function lunasFields(r, d) {
+  if (!d?.cair || d.cair.jenis !== 'pesanan' || d.ditarik || d.potong > 0 || danaReturAktif(r.retur, d.cair.ts) || !LUNAS_BOLEH_TIMPA.has(r.stPesanan)) return null;
+  const f = {}, has = (c) => r.cols.has(c);
+  if (has('Status Pesanan') && r.stPesanan !== LUNAS_STATUS) f['Status Pesanan'] = LUNAS_STATUS;
+  if (has('Progress')) f['Progress'] = 'Done';
+  if (has('Tanggal Selesai') && !r.tglSelesai) f['Tanggal Selesai'] = noonWib(d.cair.ts);
+  if (has('Jumlah Dana Cair')) f['Jumlah Dana Cair'] = d.cair.amount;
+  return f;
 }
 // Tulis isian ke Lark per tabel (batch 100, gagal -> satu-satu supaya baris bermasalah kelihatan). Kembalikan jumlah tertulis.
 async function tulisLarkTerpisah(list, label) {
@@ -846,7 +865,7 @@ async function main() {
   // shReturnCache Shopee ke-isi -- 0 API tambahan krn shReturnCache sudah nyakup 90 hari
   // penuh terlepas dari target mana yg diproses. Diminta user (19 Sep 2026): retur LAMA yg
   // justru paling butuh backfill alasan/status banding, jangan ikut ke-skip total.
-  const backfillCandidates = [], danaRows = [];
+  const backfillCandidates = [], danaRows = [], lunasRows = [];
   // Cache retur per toko -- tokennya sendiri sudah beres di Worker (gh_shopee_proxy), tidak
   // ada lagi "setup token" di sini. Dimuat SEBELUM klasifikasi: skip final di bawah perlu tahu waktu pengajuan retur.
   await Promise.all(shopIds.map(async sid => {
@@ -906,6 +925,8 @@ async function main() {
           peny: larkText(rec.fields['Penyelesaian Komplaian'] || ''), barang: larkText(rec.fields['Status Barang'] || ''), retur: returBaris };
         if (danaKandidat(dr, Math.floor(Date.now() / 1000))) danaRows.push(dr);
       }
+      if (!src.banding && cols && lunasKandidat(prevStatus, progress, jumlahCair)) // lihat LUNAS
+        lunasRows.push({ app: src.app, table: src.table, recordId: rec.record_id, orderSn, toko: getToko(rec.fields), cols, stPesanan, tglSelesai, retur: returBaris, lunas: true });
       // Retur diajukan SESUDAH status final tertulis ("diterima" / "Kembali ke Seller" palsu) -> jangan dibekukan, paket retur harus terpantau.
       // Retur batal/ditutup tidak dihitung kecuali statusnya "Kembali ke Seller" palsu (supaya sekali dibetulkan, selesai).
       const returBaru = !!returBaris?.create_time && prevTs < returBaris.create_time * 1000
@@ -1123,9 +1144,20 @@ async function main() {
   }
 
   // ── Dana cair / ditarik (R.R by Admin): hanya baris belum final & tanpa banding di marketplace ──
-  const danaUpdates = [];
-  if (danaRows.length) {
-    const nowS = Math.floor(Date.now() / 1000), byShop = {}, byTt = {}; let tanpaToko = 0, adaBanding = 0;
+  // Baris LUNAS (Faktur Belum Lunas) ikut panggilan yg sama per toko -> tanpa panggilan API dobel.
+  const danaUpdates = [], lunasUpdates = [];
+  if (danaRows.length || lunasRows.length) {
+    const nowS = Math.floor(Date.now() / 1000), byShop = {}, byTt = {}; let tanpaToko = 0, adaBanding = 0, lunasTanpaToko = 0;
+    // Toko diambil dari hasil pelacakan barusan (nama di Lark sering tak cocok, mis. Vamo -> ditebak brute force); cadangan = nama.
+    const tokoLacak = {}; for (const t of uniqueTargets) if (t.platform === 'shopee' || t.platform === 'tiktok') tokoLacak[t.orderSn] = t;
+    const tanpaNama = {};
+    for (const r of lunasRows) {
+      const t = tokoLacak[r.orderSn], ck = canonKey(t?.platform === 'tiktok' ? t.toko : r.toko), sid = t?.platform === 'shopee' ? t.shopId : t ? null : SHOPEE_NORM[ck];
+      if (sid) (byShop[sid] || (byShop[sid] = [])).push(r);
+      else if (ttCtx[ck]?.cipher) (byTt[ck] || (byTt[ck] = [])).push(r);
+      else { lunasTanpaToko++; tanpaNama[r.toko || '(kosong)'] = (tanpaNama[r.toko || '(kosong)'] || 0) + 1; }
+    }
+    if (lunasTanpaToko) log('warn', `🧾 Lunas: toko tak dikenali → ${Object.entries(tanpaNama).map(([k, v]) => `${k} ${v}`).join(', ')}`);
     for (const r of danaRows) {
       const ck = canonKey(r.toko), sid = SHOPEE_NORM[ck];
       const sInfo = sid ? (shReturnCache[sid] || {})[r.orderSn] : null, tInfo = !sid ? (ttReturnCache[ck] || {})[r.orderSn] : null;
@@ -1144,12 +1176,20 @@ async function main() {
       try { const m = await danaTiktok(ttCtx[key], [...new Set(rs.map(r => r.orderSn))], nowS, key); for (const r of rs) if (m[r.orderSn]) data.set(r, m[r.orderSn]); }
       catch (e) { log('warn', `Dana cair TikTok "${key}": ${e.message}`); }
     });
-    const kat = {};
+    const kat = {}, katLunas = {};
     for (const [r, d] of data) {
+      if (r.lunas) {
+        const f = lunasFields(r, d), k = f ? 'cair → lunas' : !d.cair ? 'belum cair' : d.ditarik ? 'ditarik' : d.potong > 0 ? 'cair lalu dipotong' : d.cair.jenis !== 'pesanan' ? 'kompensasi' : danaReturAktif(r.retur, d.cair.ts) ? 'retur berjalan' : 'Status Pesanan staf';
+        katLunas[k] = (katLunas[k] || 0) + 1;
+        if (k === 'cair lalu dipotong') log('info', `   🧾 ${r.orderSn} (${r.toko}): cair ${d.cair.amount}, dipotong ${d.potong}`);
+        if (f && Object.keys(f).length) lunasUpdates.push({ app: r.app, table: r.table, record_id: r.recordId, fields: f, orderSn: r.orderSn, kat: k });
+        continue;
+      }
       const p = danaRencana(r, { ...d, returAktif: danaReturAktif(r.retur, d.cair?.ts) }, nowS); kat[p.kat] = (kat[p.kat] || 0) + 1;
       if (Object.keys(p.f).length) danaUpdates.push({ app: r.app, table: r.table, record_id: r.recordId, fields: p.f, orderSn: r.orderSn, kat: p.kat });
     }
-    log('ok', `💸 Dana: ${data.size} pesanan dicek (${danaRows.length - adaBanding - tanpaToko - data.size} final/tidak ketemu) · ${Object.entries(kat).map(([k, v]) => `${v}× ${k}`).join(' · ')} → ${danaUpdates.length} baris perlu diisi`);
+    if (lunasRows.length) log('ok', `🧾 Lunas (Diterima Pembeli): ${lunasRows.length} kandidat (${lunasTanpaToko} toko tak dikenali) · ${Object.entries(katLunas).map(([k, v]) => `${v}× ${k}`).join(' · ')} → ${lunasUpdates.length} baris diisi`);
+    log('ok', `💸 Dana: ${data.size - Object.values(katLunas).reduce((a, b) => a + b, 0)} pesanan R.R dicek (${danaRows.length - adaBanding - tanpaToko} kandidat) · ${Object.entries(kat).map(([k, v]) => `${v}× ${k}`).join(' · ')} → ${danaUpdates.length} baris perlu diisi`);
   }
 
   // batch update ke Lark (gabung update biasa + backfill Ket Komplainan/banding)
@@ -1190,8 +1230,15 @@ async function main() {
       for (const u of danaUpdates.slice(0, 8)) log('info', `   ${u.orderSn} [${u.kat}] → ${JSON.stringify(u.fields)}`);
     } else danaTulis = await tulisLarkTerpisah(danaUpdates, '💸 Dana');
   }
+  let lunasTulis = 0;
+  if (lunasUpdates.length) {
+    if (env.DRY_RUN) {
+      log('warn', `🧪 DRY_RUN lunas: ${lunasUpdates.length} record TIDAK ditulis. Contoh:`);
+      for (const u of lunasUpdates.slice(0, 8)) log('info', `   ${u.orderSn} → ${JSON.stringify(u.fields)}`);
+    } else lunasTulis = await tulisLarkTerpisah(lunasUpdates, '🧾 Lunas');
+  }
 
-  const summary = `Selesai: ${gotOk} diupdate (${retOk} retur Shopee)${backfillUpdates.length ? ` + ${backfillUpdates.length} backfill record lama` : ''}${compUpdates.length ? `, ${env.DRY_RUN ? compUpdates.length : compTulis} kompensasi cair diisi` : ''}${danaUpdates.length ? `, ${env.DRY_RUN ? danaUpdates.length : danaTulis} isian dana cair/ditarik` : ''}, ${skipped} dilewati, ${failedRows.length} error`;
+  const summary = `Selesai: ${gotOk} diupdate (${retOk} retur Shopee)${backfillUpdates.length ? ` + ${backfillUpdates.length} backfill record lama` : ''}${compUpdates.length ? `, ${env.DRY_RUN ? compUpdates.length : compTulis} kompensasi cair diisi` : ''}${danaUpdates.length ? `, ${env.DRY_RUN ? danaUpdates.length : danaTulis} isian dana cair/ditarik` : ''}${lunasUpdates.length ? `, ${env.DRY_RUN ? lunasUpdates.length : lunasTulis} faktur lunas (diterima + cair)` : ''}, ${skipped} dilewati, ${failedRows.length} error`;
   log('ok', summary);
   const catOrder = ['Diterima Pembeli', 'Kembali ke Seller', `Retur ${RETUR2}+`, `Stuck ${STUCK}+`, `Stuck ${STUCK2}+`, `Stuck ${STUCK3}+`, 'Hilang', `Hilang ${LOST2}+`, 'Lainnya/Proses'];
   const catLine = catOrder.filter(k => catCounts[k]).map(k => `${k}: ${catCounts[k]}`).join(' · ');
